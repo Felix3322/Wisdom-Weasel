@@ -50,6 +50,16 @@ release-notes.html
 *.7z
 RELEASE_CHANGELOG.md
 deps/
+archives/
+.codex-pr-filter/
+output/lua/
+build_digest*.txt
+build_raw*.txt
+alpha_backend/model/
+alpha_backend/target/
+alpha_backend/logs/
+alpha_backend/*.pid
+third_party/alpha-input/target/
 arm64x_wrapper/*.o
 arm64x_wrapper/*.dll
 arm64x_wrapper/*.ime

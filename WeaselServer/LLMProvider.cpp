@@ -162,7 +162,7 @@ bool IsIgnorableCandidateToken(const std::wstring& token) {
     lower.push_back(static_cast<wchar_t>(std::towlower(ch)));
   }
   static const wchar_t* kForbiddenPrefixes[] = {
-      L"th",       L"think",    L"thinking", L"reason",
+      L"th",        L"think",    L"thinking", L"reason",
       L"reasoning", L"analysis", L"process",  L"step"};
   for (const wchar_t* prefix : kForbiddenPrefixes) {
     const size_t prefix_len = wcslen(prefix);
@@ -231,7 +231,8 @@ bool ExtractContentFromOpenAIChunkPayload(const std::string& payload,
     }
 
     const auto& choice = choices->front().second;
-    if (const auto finish_reason = choice.get_optional<std::string>("finish_reason")) {
+    if (const auto finish_reason =
+            choice.get_optional<std::string>("finish_reason")) {
       finished = !finish_reason->empty() && *finish_reason != "null";
     }
 
@@ -243,7 +244,8 @@ bool ExtractContentFromOpenAIChunkPayload(const std::string& payload,
 
     if (delta_content.empty()) {
       if (const auto message = choice.get_child_optional("message")) {
-        if (const auto content = message->get_optional<std::string>("content")) {
+        if (const auto content =
+                message->get_optional<std::string>("content")) {
           delta_content = *content;
         }
       }
@@ -285,7 +287,8 @@ std::string ExtractContentFromSseResponse(const std::string& sse_response) {
 
     std::string delta_content;
     bool finished = false;
-    if (ExtractContentFromOpenAIChunkPayload(payload, delta_content, finished)) {
+    if (ExtractContentFromOpenAIChunkPayload(payload, delta_content,
+                                             finished)) {
       aggregated_content += delta_content;
       if (finished) {
         break;
@@ -347,8 +350,8 @@ std::string ExtractContentFromOllamaGenerateResponse(
 }
 
 std::wstring TrimLeadingWhitespaceAndPunctuation(std::wstring text) {
-  while (!text.empty() &&
-         (std::iswspace(text.front()) || IsCandidateWrapperChar(text.front()))) {
+  while (!text.empty() && (std::iswspace(text.front()) ||
+                           IsCandidateWrapperChar(text.front()))) {
     text.erase(text.begin());
   }
   while (!text.empty() && std::iswspace(text.back())) {
@@ -369,7 +372,8 @@ std::wstring RemovePromptEcho(const std::wstring& prompt,
   }
 
   size_t overlap = 0;
-  const size_t max_overlap = (std::min)(prompt.size(), generated.size() - start);
+  const size_t max_overlap =
+      (std::min)(prompt.size(), generated.size() - start);
   for (size_t len = max_overlap; len > 0; --len) {
     if (prompt.compare(prompt.size() - len, len, generated, start, len) == 0) {
       overlap = len;
@@ -400,7 +404,8 @@ std::vector<std::wstring> BuildContinuationCandidates(
     return candidates;
   }
 
-  const size_t visible_len = (std::min)(continuation.size(), static_cast<size_t>(16));
+  const size_t visible_len =
+      (std::min)(continuation.size(), static_cast<size_t>(16));
   static const size_t kPreferredLengths[] = {2, 4, 6, 8, 12, 16};
   for (size_t preferred_len : kPreferredLengths) {
     if (preferred_len > visible_len) {
@@ -434,17 +439,19 @@ std::vector<std::wstring> BuildContinuationCandidates(
   return candidates;
 }
 
-std::vector<std::wstring> BuildSentenceContinuationCandidates(
+std::vector<std::wstring> BuildSingleContinuationCandidates(
     const std::wstring& prompt,
     const std::wstring& generated,
-    size_t max_candidates) {
+    size_t max_candidates,
+    size_t max_len,
+    const wchar_t* stop_chars) {
   std::vector<std::wstring> candidates;
   std::wstring continuation = RemovePromptEcho(prompt, generated);
   if (continuation.empty()) {
     return candidates;
   }
 
-  size_t clause_end = continuation.find_first_of(L"\r\n。！？!?；;");
+  size_t clause_end = continuation.find_first_of(stop_chars);
   if (clause_end != std::wstring::npos && clause_end > 0) {
     continuation = continuation.substr(0, clause_end);
   }
@@ -453,13 +460,182 @@ std::vector<std::wstring> BuildSentenceContinuationCandidates(
     return candidates;
   }
 
-  const size_t max_len = (std::min)(continuation.size(), static_cast<size_t>(24));
-  std::wstring candidate = NormalizeCandidateToken(continuation.substr(0, max_len));
+  const size_t visible_len = (std::min)(continuation.size(), max_len);
+  std::wstring candidate =
+      NormalizeCandidateToken(continuation.substr(0, visible_len));
   if (!IsIgnorableCandidateToken(candidate)) {
     candidates.push_back(candidate);
   }
   if (max_candidates > 0 && candidates.size() > max_candidates) {
     candidates.resize(max_candidates);
+  }
+  return candidates;
+}
+
+std::vector<std::wstring> BuildSentenceContinuationCandidates(
+    const std::wstring& prompt,
+    const std::wstring& generated,
+    size_t max_candidates) {
+  return BuildSingleContinuationCandidates(prompt, generated, max_candidates,
+                                           24, L"\r\n。！？!?；;");
+}
+
+bool LooksLikeLongPinyinInput(const std::wstring& text) {
+  size_t alpha_count = 0;
+  size_t apostrophe_count = 0;
+  for (wchar_t ch : text) {
+    if ((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z')) {
+      ++alpha_count;
+    } else if (ch == L'\'') {
+      ++apostrophe_count;
+    }
+  }
+  return alpha_count >= 10 || apostrophe_count >= 2;
+}
+
+bool ContainsCjkIdeographText(const std::wstring& text) {
+  for (wchar_t ch : text) {
+    if ((ch >= 0x3400 && ch <= 0x4DBF) || (ch >= 0x4E00 && ch <= 0x9FFF) ||
+        (ch >= 0xF900 && ch <= 0xFAFF)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::wstring BuildIndexedRimeReorderPrompt(const LLMRequest& request) {
+  const size_t output_limit =
+      request.max_candidates > 0
+          ? (std::min)(request.max_candidates, request.rime_candidates.size())
+          : request.rime_candidates.size();
+  std::wstring prompt =
+      L"任务：重排中文输入法候选。\n"
+      L"只输出编号，空格分隔。\n"
+      L"不要解释，不要输出候选词。\n";
+  prompt += LooksLikeLongPinyinInput(request.current_input)
+                ? L"长输入：优先整句通顺。\n"
+                : L"短输入：优先自然组词。\n";
+  prompt += L"拿不准就保持原顺序。\n";
+  prompt += L"输出前" + std::to_wstring(output_limit) + L"个编号。\n";
+  if (!request.context.empty()) {
+    prompt += L"上下文：" + request.context + L"\n";
+  }
+  if (!request.current_input.empty()) {
+    prompt += L"拼音：" + request.current_input + L"\n";
+  }
+  prompt += L"候选：\n";
+  for (size_t i = 0; i < request.rime_candidates.size(); ++i) {
+    prompt +=
+        std::to_wstring(i + 1) + L". " + request.rime_candidates[i] + L"\n";
+  }
+  prompt += L"编号：";
+  return prompt;
+}
+
+std::vector<std::wstring> ExtractRankedCandidatesFromIndices(
+    const std::wstring& generated,
+    const std::vector<std::wstring>& candidate_pool,
+    size_t max_candidates) {
+  std::vector<std::wstring> candidates;
+  if (generated.empty() || candidate_pool.empty()) {
+    return candidates;
+  }
+
+  std::vector<bool> used(candidate_pool.size(), false);
+  size_t i = 0;
+  while (i < generated.size()) {
+    if (!IsDigitWide(generated[i])) {
+      ++i;
+      continue;
+    }
+
+    size_t value = 0;
+    while (i < generated.size() && IsDigitWide(generated[i])) {
+      value = value * 10 + static_cast<size_t>(generated[i] - L'0');
+      ++i;
+    }
+
+    if (value == 0 || value > candidate_pool.size()) {
+      continue;
+    }
+
+    const size_t index = value - 1;
+    if (used[index]) {
+      continue;
+    }
+
+    candidates.push_back(candidate_pool[index]);
+    used[index] = true;
+    if (max_candidates > 0 && candidates.size() >= max_candidates) {
+      break;
+    }
+  }
+
+  return candidates;
+}
+
+std::vector<std::wstring> ExtractRankedCandidatesFromTextMentions(
+    const std::wstring& generated,
+    const std::vector<std::wstring>& candidate_pool,
+    size_t max_candidates) {
+  std::vector<std::wstring> candidates;
+  if (generated.empty() || candidate_pool.empty()) {
+    return candidates;
+  }
+
+  std::vector<bool> used(candidate_pool.size(), false);
+  for (size_t pos = 0; pos < generated.size();) {
+    size_t best_index = candidate_pool.size();
+    size_t best_len = 0;
+    for (size_t i = 0; i < candidate_pool.size(); ++i) {
+      if (used[i] || candidate_pool[i].empty()) {
+        continue;
+      }
+      const size_t candidate_len = candidate_pool[i].size();
+      if (candidate_len <= best_len || pos + candidate_len > generated.size()) {
+        continue;
+      }
+      if (generated.compare(pos, candidate_len, candidate_pool[i]) == 0) {
+        best_index = i;
+        best_len = candidate_len;
+      }
+    }
+
+    if (best_index < candidate_pool.size()) {
+      candidates.push_back(candidate_pool[best_index]);
+      used[best_index] = true;
+      pos += best_len;
+      if (max_candidates > 0 && candidates.size() >= max_candidates) {
+        break;
+      }
+      continue;
+    }
+
+    ++pos;
+  }
+
+  return candidates;
+}
+
+std::vector<std::wstring> FilterCandidatesAgainstPool(
+    const std::vector<std::wstring>& parsed_candidates,
+    const std::vector<std::wstring>& candidate_pool,
+    size_t max_candidates) {
+  std::vector<std::wstring> candidates;
+  for (const auto& parsed_candidate : parsed_candidates) {
+    const auto it = std::find(candidate_pool.begin(), candidate_pool.end(),
+                              parsed_candidate);
+    if (it == candidate_pool.end()) {
+      continue;
+    }
+    if (std::find(candidates.begin(), candidates.end(), parsed_candidate) !=
+        candidates.end()) {
+      continue;
+    }
+    candidates.push_back(parsed_candidate);
+    if (max_candidates > 0 && candidates.size() >= max_candidates) {
+      break;
+    }
   }
   return candidates;
 }
@@ -493,10 +669,10 @@ std::wstring GetRequestTypeName(LLMRequestType type) {
 }
 
 size_t GetOutputLimit(const LLMRequest& request) {
-  return (std::min)(
-      request.max_candidates,
-      request.type == LLMRequestType::RimeReorder ? request.rime_candidates.size()
-                                                  : request.max_candidates);
+  return (std::min)(request.max_candidates,
+                    request.type == LLMRequestType::RimeReorder
+                        ? request.rime_candidates.size()
+                        : request.max_candidates);
 }
 
 std::wstring JoinCandidatesForPrompt(
@@ -511,6 +687,17 @@ std::wstring JoinCandidatesForPrompt(
   return joined;
 }
 
+std::wstring JoinCandidatesInline(const std::vector<std::wstring>& candidates) {
+  std::wstring joined;
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    if (i > 0) {
+      joined += L" / ";
+    }
+    joined += candidates[i];
+  }
+  return joined;
+}
+
 InstructPrompt BuildInstructPrompt(const LLMRequest& request) {
   InstructPrompt prompt;
   const size_t output_limit = GetOutputLimit(request);
@@ -518,53 +705,55 @@ InstructPrompt BuildInstructPrompt(const LLMRequest& request) {
   switch (request.type) {
     case LLMRequestType::NoInputPrediction:
       prompt.system_prompt =
-          L"你是一个智能中文输入法，请根据上下文预测接下来最可能出现的"
-          + std::to_wstring(request.max_candidates) + L"个候选词。\n\n"
+          L"你是一个智能中文输入法，请根据上下文预测接下来最可能出现的" +
+          std::to_wstring(request.max_candidates) +
+          L"个候选词。\n\n"
           L"要求：\n"
           L"1. 只返回候选词，不要任何解释或标点\n"
           L"2. 候选词之间用单个空格分隔\n"
           L"3. 按可能性从高到低排列\n"
           L"4. 确保候选词都是有效的中文词汇或常用短语\n"
-          L"5. 返回词数严格不超过"
-          + std::to_wstring(request.max_candidates) + L"个\n";
+          L"5. 返回词数严格不超过" +
+          std::to_wstring(request.max_candidates) + L"个\n";
       prompt.user_prompt = L"上下文：\"" + request.context + L"\"\n";
       prompt.user_prompt += L"候选词：";
       return prompt;
     case LLMRequestType::PinyinConstrainedPrediction:
       prompt.system_prompt =
-          L"你是一个智能中文输入法，请根据上下文和当前拼音，预测接下来最可能出现的"
-          + std::to_wstring(request.max_candidates) + L"个候选词。\n\n"
-          L"要求：\n"
-          L"1. 只返回候选词，不要任何解释或标点\n"
-          L"2. 候选词之间用单个空格分隔\n"
-          L"3. 按可能性从高到低排列\n"
-          L"4. 每个候选词都必须严格匹配当前拼音约束\n"
-          L"5. 如果上下文为空或无关，也必须优先满足拼音约束\n"
-          L"6. 确保候选词都是有效的中文词汇或常用短语\n"
-          L"7. 返回词数严格不超过"
-          + std::to_wstring(request.max_candidates) + L"个\n";
-      prompt.user_prompt = L"上下文：\"" + request.context + L"\"\n";
+          L"你现在扮演中文输入法助手。"
+          L"我会告诉你我正在输入的拼音。"
+          L"请直接给我最像输入法候选栏的中文候选。"
+          L"只给候选，不要解释。";
+      prompt.user_prompt = L"我现在在打“" + request.current_input + L"”。\n";
+      if (!request.context.empty()) {
+        prompt.user_prompt += L"前面的内容是：“" + request.context + L"”。\n";
+      }
       prompt.user_prompt +=
-          L"当前拼音：\"" + request.current_input + L"\"\n候选词：";
+          L"请给我 " + std::to_wstring(request.max_candidates) +
+          L" 个最自然的中文候选，每行一个。"
+          L"候选必须和这个拼音对应，优先 2 到 4 字、能直接上屏。";
       return prompt;
     case LLMRequestType::RimeReorder:
       prompt.system_prompt =
-          L"你是一个智能中文输入法，请根据上下文和当前拼音，对给定的 Rime 候选词重新排序。\n\n"
-          L"要求：\n"
-          L"1. 只能从给定候选列表中选择，不得新增、改写或拆分候选词\n"
-          L"2. 只返回重排后的候选词，不要解释、编号或标点\n"
-          L"3. 候选词之间用单个空格分隔\n"
-          L"4. 按更符合上下文的顺序输出\n"
-          L"5. 若无法判断，尽量保持原顺序\n"
-          L"6. 返回词数严格不超过"
-          + std::to_wstring(output_limit) + L"个\n";
-      prompt.user_prompt = L"上下文：\"" + request.context + L"\"\n";
+          L"你现在扮演中文输入法助手。"
+          L"我会给你当前拼音、上下文和一组现成候选。"
+          L"请把更可能上屏的候选排在前面。"
+          L"只回复候选词本身，用空格分隔，不要解释。";
+      prompt.user_prompt.clear();
       if (!request.current_input.empty()) {
-        prompt.user_prompt += L"当前拼音：\"" + request.current_input + L"\"\n";
+        prompt.user_prompt += L"我现在在打“" + request.current_input + L"”。\n";
+      }
+      if (!request.context.empty()) {
+        prompt.user_prompt += L"前面的内容是：“" + request.context + L"”。\n";
       }
       prompt.user_prompt +=
-          L"Rime 候选词：\n" + JoinCandidatesForPrompt(request.rime_candidates)
-          + L"\n重排结果：";
+          L"现在屏幕上的候选有：" +
+          JoinCandidatesInline(request.rime_candidates) +
+          L"。\n"
+          L"请按更像我现在想打的顺序排一下，只能使用这些候选。"
+          L"如果拿不准，就尽量保持原顺序。"
+          L"最多给我前 " +
+          std::to_wstring(output_limit) + L" 个。";
       return prompt;
   }
 
@@ -576,36 +765,38 @@ std::wstring BuildCompactPrompt(const LLMRequest& request) {
 
   switch (request.type) {
     case LLMRequestType::NoInputPrediction: {
-      std::wstring prompt =
-          L"请根据以下上下文预测接下来最可能出现的"
-          + std::to_wstring(request.max_candidates) + L"个中文候选词。\n"
-          L"只返回候选词，使用空格分隔，不要解释。\n";
+      std::wstring prompt = L"请根据以下上下文预测接下来最可能出现的" +
+                            std::to_wstring(request.max_candidates) +
+                            L"个中文候选词。\n"
+                            L"只返回候选词，使用空格分隔，不要解释。\n";
       prompt += L"上下文：\"" + request.context + L"\"\n";
       prompt += L"候选词：";
       return prompt;
     }
     case LLMRequestType::PinyinConstrainedPrediction: {
-      std::wstring prompt =
-          L"请根据以下上下文和当前拼音，预测接下来最可能出现的"
-          + std::to_wstring(request.max_candidates) + L"个中文候选词。\n"
-          L"只返回满足拼音约束的候选词，使用空格分隔，不要解释。\n";
-      prompt += L"上下文：\"" + request.context + L"\"\n";
-      prompt += L"当前拼音：\"" + request.current_input + L"\"\n候选词：";
+      std::wstring prompt = L"我在打“" + request.current_input + L"”。\n";
+      if (!request.context.empty()) {
+        prompt += L"前面的内容是：“" + request.context + L"”。\n";
+      }
+      prompt += L"请直接给我 " + std::to_wstring(request.max_candidates) +
+                L" 个最自然的中文候选，每行一个。"
+                L"候选必须和这个拼音对应，优先短句，不要解释。";
       return prompt;
     }
     case LLMRequestType::RimeReorder: {
-      std::wstring prompt =
-          L"请根据以下上下文和当前拼音，对给定的 Rime 候选词重新排序。\n"
-          L"只能从给定候选列表中选择，不得新增候选词；只返回重排后的前"
-          + std::to_wstring(output_limit)
-          + L"个候选词，使用空格分隔，不要解释。\n";
-      prompt += L"上下文：\"" + request.context + L"\"\n";
+      std::wstring prompt = L"请帮我把输入法候选重新排一下顺序。\n";
       if (!request.current_input.empty()) {
-        prompt += L"当前拼音：\"" + request.current_input + L"\"\n";
+        prompt += L"我现在在打“" + request.current_input + L"”。\n";
       }
-      prompt +=
-          L"Rime 候选词：\n" + JoinCandidatesForPrompt(request.rime_candidates)
-          + L"\n重排结果：";
+      if (!request.context.empty()) {
+        prompt += L"前面的内容是：“" + request.context + L"”。\n";
+      }
+      prompt += L"现在候选有：" +
+                JoinCandidatesInline(request.rime_candidates) +
+                L"。\n"
+                L"请按更像我现在想打的顺序回复，用空格分隔，只能用这些候选。"
+                L"最多给我前 " +
+                std::to_wstring(output_limit) + L" 个，不要解释。";
       return prompt;
     }
   }
@@ -628,8 +819,7 @@ std::wstring BuildBaseCompletionPrompt(const LLMRequest& request) {
   return std::wstring();
 }
 
-std::vector<std::string> BuildPinyinConstraintParts(
-    const LLMRequest& request) {
+std::vector<std::string> BuildPinyinConstraintParts(const LLMRequest& request) {
   std::vector<std::string> constraint_parts;
   if (request.type == LLMRequestType::NoInputPrediction ||
       request.current_input.empty()) {
@@ -943,6 +1133,26 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
             ? m_api_url.substr(0, m_api_url.find("/v1/chat/completions")) +
                   "/api/generate"
             : "http://127.0.0.1:11434/api/generate";
+    const double low_temperature =
+        (std::max)(0.08, (std::min)(m_temperature, 0.22));
+    const double high_temperature =
+        (std::min)(1.0, (std::max)(m_temperature, 0.82));
+
+    struct OllamaContinuationBranchSpec {
+      const wchar_t* label;
+      double temperature;
+      int num_predict;
+      size_t max_candidate_chars;
+      const wchar_t* stop_chars;
+    };
+
+    const std::vector<OllamaContinuationBranchSpec> branch_specs = {
+        {L"短词", low_temperature, 10, 4, L"\r\n。！？!?；;，,、 "},
+        {L"短语", (low_temperature + high_temperature) / 2.0, 20, 8,
+         L"\r\n。！？!?；;，,、"},
+        {L"长句", high_temperature, 48, 24, L"\r\n。！？!?；;"},
+    };
+
     auto build_generate_body = [&](double temperature, int num_predict) {
       std::ostringstream json;
       json << "{"
@@ -955,97 +1165,88 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
            << "\"think\":false,"
            << "\"options\":{"
            << "\"temperature\":" << temperature << ","
-           << "\"num_predict\":" << num_predict
-           << "}"
+           << "\"num_predict\":" << num_predict << "}"
            << "}";
       return json.str();
     };
 
-    const std::string sentence_branch_body =
-        build_generate_body((std::max)(m_temperature, 0.12), 24);
-    const std::string phrase_branch_body =
-        build_generate_body((std::max)(m_temperature, 0.42), 12);
-    const std::string alt_phrase_branch_body =
-        build_generate_body((std::max)(m_temperature, 0.62), 12);
-
     extern DevConsole* g_dev_console;
     if (g_dev_console && g_dev_console->IsEnabled()) {
-      g_dev_console->WriteLine(L"[LLM] 发送请求（Ollama Generate / continuation）");
+      g_dev_console->WriteLine(
+          L"[LLM] 发送请求（Ollama Generate / continuation）");
       g_dev_console->WriteLine(L"  请求类型: " +
                                llm_request::GetRequestTypeName(request.type));
       g_dev_console->WriteLine(L"  原始上下文: " + request.context);
       g_dev_console->WriteLine(L"  请求URL: " + u8tow(generate_url));
-      g_dev_console->WriteLine(L"  分支1（短句）请求体: " + u8tow(sentence_branch_body));
+      for (const auto& branch : branch_specs) {
+        std::wstringstream ss;
+        ss << L"  " << branch.label << L": temperature=" << branch.temperature
+           << L", num_predict=" << branch.num_predict
+           << L", max_candidate_chars=" << branch.max_candidate_chars;
+        g_dev_console->WriteLine(ss.str());
+      }
     }
 
-    auto merge_candidate_set =
-        [&](const std::vector<std::wstring>& incoming) {
-          for (const auto& candidate : incoming) {
-            if (candidate.empty()) {
-              continue;
-            }
-            if (std::find(candidates.begin(), candidates.end(), candidate) !=
-                candidates.end()) {
-              continue;
-            }
-            candidates.push_back(candidate);
-            if (request.max_candidates > 0 &&
-                candidates.size() >= request.max_candidates) {
-              break;
-            }
-          }
-        };
+    auto merge_candidate_set = [&](const std::vector<std::wstring>& incoming) {
+      bool changed = false;
+      for (const auto& candidate : incoming) {
+        if (candidate.empty()) {
+          continue;
+        }
+        if (std::find(candidates.begin(), candidates.end(), candidate) !=
+            candidates.end()) {
+          continue;
+        }
+        candidates.push_back(candidate);
+        changed = true;
+      }
+      return changed;
+    };
 
-    std::string sentence_response_body;
-    if (ExecuteOllamaGenerateRequest(generate_url, sentence_branch_body,
-                                     prompt_utf8, request.max_candidates,
-                                     [&](const std::vector<std::wstring>& partial_branch_candidates) {
-                                       merge_candidate_set(partial_branch_candidates);
-                                       if (on_partial && !candidates.empty()) {
-                                         return on_partial(candidates);
-                                       }
-                                       return true;
-                                     },
-                                     sentence_response_body)) {
+    auto publish_candidates = [&]() {
+      if (!on_partial || candidates.empty()) {
+        return true;
+      }
+      std::vector<std::wstring> visible_candidates = candidates;
+      if (request.max_candidates > 0 &&
+          visible_candidates.size() > request.max_candidates) {
+        visible_candidates.resize(request.max_candidates);
+      }
+      return on_partial(visible_candidates);
+    };
+
+    for (size_t branch_index = 0; branch_index < branch_specs.size();
+         ++branch_index) {
+      const auto& branch = branch_specs[branch_index];
+      const std::string branch_body =
+          build_generate_body(branch.temperature, branch.num_predict);
+      std::string branch_response_body;
+      if (!ExecuteOllamaGenerateRequest(generate_url, branch_body, prompt_utf8,
+                                        request.max_candidates, nullptr,
+                                        branch_response_body)) {
+        continue;
+      }
+
       const std::wstring generated =
-          u8tow(ExtractContentFromOllamaGenerateResponse(sentence_response_body));
-      merge_candidate_set(BuildSentenceContinuationCandidates(
-          request.context, generated, 1));
-      merge_candidate_set(BuildContinuationCandidates(request.context, generated,
-                                                      request.max_candidates));
-      if (on_partial && !candidates.empty()) {
-        on_partial(candidates);
-      }
-    }
-
-    if (request.max_candidates == 0 || candidates.size() < request.max_candidates) {
-      std::string phrase_response_body;
-      if (ExecuteOllamaGenerateRequest(generate_url, phrase_branch_body,
-                                       prompt_utf8, request.max_candidates,
-                                       nullptr, phrase_response_body)) {
-        merge_candidate_set(BuildContinuationCandidates(
-            request.context,
-            u8tow(ExtractContentFromOllamaGenerateResponse(phrase_response_body)),
-            request.max_candidates));
-      }
-    }
-
-    if (request.max_candidates == 0 || candidates.size() < request.max_candidates) {
-      std::string alt_phrase_response_body;
-      if (ExecuteOllamaGenerateRequest(generate_url, alt_phrase_branch_body,
-                                       prompt_utf8, request.max_candidates,
-                                       nullptr, alt_phrase_response_body)) {
-        merge_candidate_set(BuildContinuationCandidates(
-            request.context,
-            u8tow(ExtractContentFromOllamaGenerateResponse(alt_phrase_response_body)),
-            request.max_candidates));
+          u8tow(ExtractContentFromOllamaGenerateResponse(branch_response_body));
+      const size_t candidate_count_before = candidates.size();
+      merge_candidate_set(BuildSingleContinuationCandidates(
+          request.context, generated, 1, branch.max_candidate_chars,
+          branch.stop_chars));
+      if (candidates.size() > candidate_count_before &&
+          !publish_candidates()) {
+        break;
       }
     }
 
     if (g_dev_console && g_dev_console->IsEnabled()) {
       std::wstringstream ss;
-      ss << L"[LLM] continuation 多分支合并后候选数: " << candidates.size();
+      ss << L"[LLM] continuation 三分支合并后候选数: " << candidates.size();
       g_dev_console->WriteLine(ss.str());
+    }
+    if (request.max_candidates > 0 &&
+        candidates.size() > request.max_candidates) {
+      candidates.resize(request.max_candidates);
     }
     return candidates;
   }
@@ -1080,8 +1281,19 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
   const bool has_reasoning_directive =
       extra_body_members.find("\"reasoning_effort\"") != std::string::npos ||
       extra_body_members.find("\"reasoning\"") != std::string::npos;
+  const bool has_think_directive =
+      extra_body_members.find("\"think\"") != std::string::npos;
+  const bool has_stop_directive =
+      extra_body_members.find("\"stop\"") != std::string::npos;
   if (is_local_ollama && !has_reasoning_directive) {
     json << ",\"reasoning_effort\":\"none\"";
+  }
+  if (is_local_ollama && !has_think_directive) {
+    json << ",\"think\":false";
+  }
+  if (is_local_ollama && !has_stop_directive &&
+      request.type != LLMRequestType::NoInputPrediction) {
+    json << ",\"stop\":[\"Thinking:\",\"<|im_start|>\",\"<|endoftext|>\"]";
   }
   if (!extra_body_members.empty()) {
     json << "," << extra_body_members;
@@ -1101,8 +1313,8 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
       g_dev_console->WriteLine(L"  当前输入: " + request.current_input);
     }
     if (!request.rime_candidates.empty()) {
-      g_dev_console->WriteLine(
-          L"  Rime候选数: " + std::to_wstring(request.rime_candidates.size()));
+      g_dev_console->WriteLine(L"  Rime候选数: " +
+                               std::to_wstring(request.rime_candidates.size()));
     }
     g_dev_console->WriteLine(L"  请求URL: " + u8tow(m_api_url));
     g_dev_console->WriteLine(L"  请求体: " + u8tow(request_body));
@@ -1126,7 +1338,33 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
 
   // 解析响应
   candidates = ParseResponse(response_body);
-  if (request.max_candidates > 0 && candidates.size() > request.max_candidates) {
+  if (request.type == LLMRequestType::RimeReorder) {
+    const std::wstring extracted_content =
+        u8tow(ExtractContentFromSseResponse(response_body));
+    if (!extracted_content.empty()) {
+      const std::vector<std::wstring> mentioned_candidates =
+          ExtractRankedCandidatesFromTextMentions(extracted_content,
+                                                  request.rime_candidates,
+                                                  request.max_candidates);
+      if (mentioned_candidates.size() > candidates.size()) {
+        candidates = mentioned_candidates;
+      }
+    }
+    const std::vector<std::wstring> filtered_candidates =
+        FilterCandidatesAgainstPool(candidates, request.rime_candidates,
+                                    request.max_candidates);
+    if (filtered_candidates.size() != candidates.size() && g_dev_console &&
+        g_dev_console->IsEnabled()) {
+      std::wstringstream ss;
+      ss << L"[LLM] 重排响应中有 "
+         << (candidates.size() - filtered_candidates.size())
+         << L" 个候选不在 Rime 候选池内，已丢弃";
+      g_dev_console->WriteLine(ss.str());
+    }
+    candidates = filtered_candidates;
+  }
+  if (request.max_candidates > 0 &&
+      candidates.size() > request.max_candidates) {
     candidates.resize(request.max_candidates);
   }
 
@@ -1427,8 +1665,8 @@ bool OpenAICompatibleProvider::ExecuteOllamaGenerateRequest(
         aggregated_content += delta_content;
         if (on_partial) {
           std::vector<std::wstring> partial_candidates =
-              BuildContinuationCandidates(prompt_prefix, u8tow(aggregated_content),
-                                          max_candidates);
+              BuildContinuationCandidates(
+                  prompt_prefix, u8tow(aggregated_content), max_candidates);
           if (!partial_candidates.empty() &&
               partial_candidates != last_partial_candidates) {
             last_partial_candidates = partial_candidates;

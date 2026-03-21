@@ -515,7 +515,8 @@ std::string LlamaCppProvider::GenerateText(const std::string& prompt, size_t max
   }
 
   // 准备批次并生成
-  llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+  llama_batch batch =
+      llama_batch_get_one(prompt_tokens.data(), static_cast<int32_t>(n_prompt_tokens));
   std::string response;
 
   // 耗时统计
@@ -631,7 +632,11 @@ std::string LlamaCppProvider::GenerateText(const std::string& prompt, size_t max
 }
 
 std::vector<std::string> LlamaCppProvider::GenerateCandidatesBatch(
-    const std::string& system_prompt_utf8, const std::string& user_prompt_utf8, size_t n_parallel, int max_new_tokens) {
+    const std::string& system_prompt_utf8,
+    const std::string& user_prompt_utf8,
+    size_t n_parallel,
+    int max_new_tokens,
+    const std::function<bool(const std::vector<std::string>&)>& on_partial) {
   std::vector<std::string> candidates;
   extern DevConsole* g_dev_console;
 
@@ -794,6 +799,15 @@ std::vector<std::string> LlamaCppProvider::GenerateCandidatesBatch(
         candidates[i].append(buf, (size_t)n);
       }
 
+      if (on_partial && !on_partial(candidates)) {
+        if (g_dev_console && g_dev_console->IsEnabled()) {
+          g_dev_console->WriteLine(
+              L"[LLM] GenerateCandidatesBatch: on_partial 请求提前停止");
+        }
+        batch.n_tokens = 0;
+        break;
+      }
+
       const int32_t batch_idx = batch.n_tokens;
       batch.token[batch_idx] = new_token_id;
       if (batch.pos) batch.pos[batch_idx] = (llama_pos)n_cur;
@@ -851,7 +865,7 @@ std::vector<std::string> LlamaCppProvider::GenerateCandidatesBatch(
 
 std::vector<std::wstring> LlamaCppProvider::ExecuteRequest(
     const LLMRequest& request,
-    const LLMPartialCallback& /*on_partial*/) {
+    const LLMPartialCallback& on_partial) {
   std::vector<std::wstring> candidates;
 
   if (!IsAvailable() || !llm_request::IsExecutable(request)) {
@@ -866,6 +880,20 @@ std::vector<std::wstring> LlamaCppProvider::ExecuteRequest(
   auto remove_all_spaces = [](std::wstring& s) {
     s.erase(std::remove(s.begin(), s.end(), L' '), s.end());
   };
+  auto normalize_candidates =
+      [&](const std::vector<std::string>& raw_candidates) {
+        std::vector<std::wstring> normalized;
+        normalized.reserve(raw_candidates.size());
+        for (const auto& raw : raw_candidates) {
+          std::wstring candidate = u8tow(raw);
+          trim_trailing_fffd(candidate);
+          remove_all_spaces(candidate);
+          if (!candidate.empty()) {
+            normalized.push_back(candidate);
+          }
+        }
+        return normalized;
+      };
 
   std::string system_prompt_utf8;
   std::string prompt_utf8;
@@ -903,23 +931,38 @@ std::vector<std::wstring> LlamaCppProvider::ExecuteRequest(
     }
   }
 
-  // 当需要多个候选时，使用批量采样（与单次生成一样复用 system KV cache）
-  if (request.max_candidates > 1) {
+  // 当需要多个候选时，除“重排”外使用批量采样。
+  // Rime 重排需要生成一个完整的“排序后列表”文本，再按空格解析；
+  // 若走批量采样会退化成多个独立补全，无法得到有效重排结果。
+  if (request.type != LLMRequestType::RimeReorder &&
+      request.max_candidates > 1) {
     ULONGLONG start_time = GetTickCount64();
+    std::vector<std::wstring> last_partial_candidates;
+    const bool enable_token_streaming =
+        request.type == LLMRequestType::NoInputPrediction && !!on_partial;
     std::vector<std::string> raw = GenerateCandidatesBatch(
-        system_prompt_utf8, prompt_utf8, request.max_candidates, 4);
+        system_prompt_utf8,
+        prompt_utf8,
+        request.max_candidates,
+        4,
+        enable_token_streaming
+            ? std::function<bool(const std::vector<std::string>&)>(
+                  [&](const std::vector<std::string>& partial_raw_candidates) {
+                    std::vector<std::wstring> partial_candidates =
+                        normalize_candidates(partial_raw_candidates);
+                    if (partial_candidates.empty() ||
+                        partial_candidates == last_partial_candidates) {
+                      return true;
+                    }
+                    last_partial_candidates = partial_candidates;
+                    return on_partial(partial_candidates);
+                  })
+            : nullptr);
     ULONGLONG elapsed_ms = GetTickCount64() - start_time;
     if (g_dev_console && g_dev_console->IsEnabled()) {
       g_dev_console->WriteLine(L"[LLM] 批量采样完成，耗时: " + std::to_wstring(elapsed_ms) + L" ms");
     }
-    for (const auto& s : raw) {
-      std::wstring w = u8tow(s);
-      if (!w.empty()) candidates.push_back(w);
-    }
-    if (!m_instruct_model) {
-      for (auto& c : candidates) trim_trailing_fffd(c);
-    }
-    for (auto& c : candidates) remove_all_spaces(c);
+    candidates = normalize_candidates(raw);
     return candidates;
   }
 
@@ -935,7 +978,13 @@ std::vector<std::wstring> LlamaCppProvider::ExecuteRequest(
 
   // 生成文本（单候选或回退）
   ULONGLONG start_time = GetTickCount64();
-  std::string response = GenerateText(prompt_utf8, m_max_tokens);
+  size_t generation_max_tokens = static_cast<size_t>(m_max_tokens);
+  if (request.type == LLMRequestType::RimeReorder) {
+    generation_max_tokens =
+        (std::min<size_t>)(128, (std::max<size_t>)(generation_max_tokens,
+                                                   request.max_candidates * 6));
+  }
+  std::string response = GenerateText(prompt_utf8, generation_max_tokens);
   ULONGLONG end_time = GetTickCount64();
   ULONGLONG elapsed_ms = end_time - start_time;
 

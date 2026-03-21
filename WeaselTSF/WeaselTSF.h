@@ -129,6 +129,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
 
   /* IPC */
   bool _EnsureServerConnected();
+  void _PollServerUpdate();
 
   /* UI */
   void _UpdateUI(const weasel::Context& ctx, const weasel::Status& status);

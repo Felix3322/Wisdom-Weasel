@@ -92,7 +92,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
 
   // 设置上下文历史记录实例
   void SetContextHistory(ContextHistory* context_history);
-  
+
   // 设置开发终端实例
   void SetDevConsole(DevConsole* dev_console);
 
@@ -111,9 +111,11 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   struct LLMCandidateSnapshot {
     std::vector<std::wstring> candidates;
     std::vector<std::wstring> rerank_candidates;
+    std::vector<size_t> rerank_indices;
     bool require_rime_candidates;
     bool enable_rime_reorder;
     bool prefer_llm_primary;
+    uint64_t rerank_ui_update_not_before;
   };
 
   void _Setup();
@@ -134,6 +136,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   void _UpdateShowNotifications(RimeConfig* config, bool initialize = false);
   std::wstring _TrimPredictionContext(const std::wstring& context) const;
   LLMCandidateSnapshot _SnapshotLLMCandidates();
+  bool _HasLLMDisplayCandidates(const LLMCandidateSnapshot& llm_snapshot) const;
   std::vector<DisplayCandidate> _BuildDisplayCandidates(
       const RimeContext* ctx,
       const LLMCandidateSnapshot& llm_snapshot);
@@ -150,6 +153,9 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
                                             RimeSessionId session_id,
                                             DWORD event_time,
                                             bool triggered_by_grave_key);
+  void _ClearContextHistory(const std::wstring& reason);
+  void _NoteUserActivity();
+  void _ArmNoInputPredictionAutoHide(WeaselSessionId ipc_id);
 
   bool _IsSessionTSF(RimeSessionId session_id);
   void _UpdateInlinePreeditStatus(WeaselSessionId ipc_id);
@@ -188,23 +194,32 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool m_global_ascii_mode;
   int m_show_notifications_time;
   DWORD m_pid;
-  
+
   // 上下文历史记录和开发终端
   ContextHistory* m_context_history;
   DevConsole* m_dev_console;
 
   // LLM相关（上下文统一从 m_context_history 获取，不再单独维护 buffer）
-  std::unique_ptr<LLMProvider> m_llm_provider;
+  std::unique_ptr<LLMProvider> m_llm_provider;            // 无拼音预测
+  std::unique_ptr<LLMProvider> m_pinyin_rerank_provider;  // 有拼音实时重排
   bool m_llm_prediction_mode;
   std::vector<std::wstring> m_current_llm_candidates;
   std::vector<std::wstring> m_current_llm_rerank_candidates;
+  std::vector<size_t> m_current_llm_rerank_indices;
+  uint64_t m_current_llm_rerank_ui_update_not_before;
   std::wstring m_pending_llm_commit;  // 待提交的LLM候选词
-  std::atomic<uint64_t> m_llm_request_seq{0};  // LLM异步预测请求序号（用于丢弃旧结果）
-  std::mutex m_llm_mutex;                      // 保护 m_current_llm_candidates
+  std::atomic<uint64_t> m_llm_request_seq{
+      0};  // LLM异步预测请求序号（用于丢弃旧结果）
+  std::atomic<uint64_t> m_llm_user_activity_seq{
+      0};  // 用户交互序号（用于无输入预测超时）
+  std::atomic<uint64_t> m_llm_no_input_hide_seq{0};  // 无输入预测自动隐藏序号
+  std::mutex m_llm_mutex;  // 保护 m_current_llm_candidates
   bool m_current_llm_candidates_require_rime;
   bool m_current_llm_candidates_enable_rime_reorder;
   bool m_current_llm_candidates_prefer_primary;
+  bool m_current_llm_candidates_from_no_input;
   bool m_llm_developer_mode;
+  bool m_llm_enable_pinyin_constraint;
   size_t m_llm_context_recent_words;
   size_t m_llm_context_max_chars;
   DWORD m_llm_input_prediction_debounce_ms;
@@ -213,21 +228,27 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   size_t m_consecutive_edit_key_count;  // 连续编辑键次数
   bool m_has_display_highlight_override;
   size_t m_display_highlight_override;
-  
+
   // 双击·键检测（用于清空上下文）
   DWORD m_last_grave_key_time;  // 上次·键按下的时间（毫秒）
-  static const DWORD GRAVE_DOUBLE_CLICK_TIMEOUT = 500;  // 双击时间间隔阈值（毫秒）
-  static const DWORD LLM_TRADITIONAL_CANDIDATE_IDLE_DELAY_MS = 1000;  // 传统候选出现后至少等待 1 秒未选词才触发
-  static const DWORD LLM_RERANK_SUPPRESS_MS = 800;      // 连续编辑后抑制重排时长
-  static const DWORD LLM_EDIT_BURST_WINDOW_MS = 150;    // 识别连续编辑的时间窗口
-  static const size_t LLM_EDIT_BURST_THRESHOLD = 3;     // 连续编辑触发抑制阈值
+  static const DWORD GRAVE_DOUBLE_CLICK_TIMEOUT =
+      500;  // 双击时间间隔阈值（毫秒）
+  static const DWORD LLM_INPUT_IDLE_TRIGGER_MS =
+      1000;  // 有输入时，空闲 1 秒后才触发 LLM 重排/生成
+  static const DWORD LLM_NO_INPUT_AUTO_HIDE_MS =
+      10000;  // 无输入预测 10 秒无操作后自动隐藏
+  static const DWORD LLM_RERANK_SUPPRESS_MS = 800;    // 连续编辑后抑制重排时长
+  static const DWORD LLM_EDIT_BURST_WINDOW_MS = 150;  // 识别连续编辑的时间窗口
+  static const size_t LLM_EDIT_BURST_THRESHOLD = 3;   // 连续编辑触发抑制阈值
 
   // LLM预测相关方法
-  void _TriggerLLMPrediction(WeaselSessionId ipc_id,
-                             LLMRequestType request_type =
-                                 LLMRequestType::NoInputPrediction,
-                             const std::wstring& current_input = L"",
-                             bool require_rime_candidates = false,
-                             DWORD debounce_ms = 0);
-  void _ExitLLMPredictionMode(WeaselSessionId ipc_id);
+  void _TriggerLLMPrediction(
+      WeaselSessionId ipc_id,
+      LLMRequestType request_type = LLMRequestType::NoInputPrediction,
+      const std::wstring& current_input = L"",
+      bool require_rime_candidates = false,
+      DWORD debounce_ms = 0,
+      uint64_t ui_update_not_before = 0);
+  void _ExitLLMPredictionMode(WeaselSessionId ipc_id,
+                              bool refresh_ui_immediately = true);
 };

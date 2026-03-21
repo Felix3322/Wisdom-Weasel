@@ -175,10 +175,14 @@ if %build_x86% == 0 (
 if %build_x64% == 1 (
   msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="x64" /fl2 %build_sdk_option%
   if errorlevel 1 goto error
+  call :build_alpha_rerank_core x64
+  if errorlevel 1 goto error
 )
 
 if %build_x86% == 1 (
   msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="Win32" /fl1 %build_sdk_option%
+  if errorlevel 1 goto error
+  call :build_alpha_rerank_core Win32
   if errorlevel 1 goto error
 )
 
@@ -248,6 +252,48 @@ rem build boost
     b2 %BJAM_OPTIONS_ARM64% stage %BOOST_COMPILED_LIBS%
     if errorlevel 1 goto error
   )
+  exit /b
+
+rem ---------------------------------------------------------------------------
+:build_alpha_rerank_core
+  set alpha_platform=%1
+  if "%alpha_platform%" == "" exit /b 1
+
+  set alpha_outdir=
+  set alpha_machine=
+  set alpha_rime_lib=
+  if "%alpha_platform%" == "x64" (
+    set alpha_outdir=output\lua\wanxiang
+    set alpha_machine=/MACHINE:X64
+    set alpha_rime_lib=lib64\rime.lib
+  )
+  if "%alpha_platform%" == "Win32" (
+    set alpha_outdir=output\Win32\lua\wanxiang
+    set alpha_machine=/MACHINE:X86
+    set alpha_rime_lib=lib\rime.lib
+  )
+  if not defined alpha_outdir exit /b 1
+
+  if not exist %alpha_outdir% mkdir %alpha_outdir%
+
+  set alpha_runtime=/MT
+  set alpha_opt=/O2 /DNDEBUG
+  if /I "%build_config%" == "Debug" (
+    set alpha_runtime=/MTd
+    set alpha_opt=/Od /Zi
+  )
+
+  cl.exe /nologo /LD /std:c++17 /EHsc /utf-8 %alpha_runtime% %alpha_opt% ^
+    /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN ^
+    /I include ^
+    /Fo%alpha_outdir%\alpha_rerank_core.obj ^
+    /Fd%alpha_outdir%\alpha_rerank_core.pdb ^
+    /Fe%alpha_outdir%\alpha_rerank_core.dll ^
+    RimeLuaAlpha\alpha_rerank_core.cpp ^
+    /link /NOLOGO %alpha_machine% %alpha_rime_lib% kernel32.lib
+  if errorlevel 1 goto error
+  if exist %alpha_outdir%\alpha_rerank_core.lib del /q %alpha_outdir%\alpha_rerank_core.lib
+  if exist %alpha_outdir%\alpha_rerank_core.exp del /q %alpha_outdir%\alpha_rerank_core.exp
   exit /b
 
 rem ---------------------------------------------------------------------------

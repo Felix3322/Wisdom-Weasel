@@ -13,37 +13,118 @@
 #include <regex>
 #include <rime_api.h>
 
-// 判断字符是否为分隔符（仅空格/标点），用于决定 commit 是否触发进入 LLM 预测模式
+// 判断字符是否为分隔符（仅空格/标点），用于决定 commit 是否触发进入 LLM
+// 预测模式
 static bool IsSeparatorOrPunctuation(wchar_t ch) {
   if (ch == L' ' || ch == L'\t' || ch == L'\n' || ch == L'\r')
     return true;
   // 常见中文标点
-  if (ch == L'，' || ch == L'。' || ch == L'、' || ch == L'；' ||
-      ch == L'：' || ch == L'？' || ch == L'！' || ch == L'…' ||
-      ch == L'—' || ch == L'–' || ch == L'（' || ch == L'）' ||
-      ch == L'【' || ch == L'】' || ch == L'《' || ch == L'》' ||
-      ch == L'“' || ch == L'”' || ch == L'‘' || ch == L'’')
+  if (ch == L'，' || ch == L'。' || ch == L'、' || ch == L'；' || ch == L'：' ||
+      ch == L'？' || ch == L'！' || ch == L'…' || ch == L'—' || ch == L'–' ||
+      ch == L'（' || ch == L'）' || ch == L'【' || ch == L'】' || ch == L'《' ||
+      ch == L'》' || ch == L'“' || ch == L'”' || ch == L'‘' || ch == L'’')
     return true;
   // 常见英文/通用标点
-  if (ch == L',' || ch == L'.' || ch == L';' || ch == L':' ||
-      ch == L'?' || ch == L'!' || ch == L'-' || ch == L'_' ||
-      ch == L'(' || ch == L')' || ch == L'[' || ch == L']' ||
-      ch == L'{' || ch == L'}' || ch == L'"' || ch == L'\'' ||
-      ch == L'/' || ch == L'\\' || ch == L'*' || ch == L'#' ||
-      ch == L'@' || ch == L'$' || ch == L'%' || ch == L'^' ||
-      ch == L'&' || ch == L'+' || ch == L'=' || ch == L'~' ||
-      ch == L'`' || ch == L'|' || ch == L'<' || ch == L'>')
+  if (ch == L',' || ch == L'.' || ch == L';' || ch == L':' || ch == L'?' ||
+      ch == L'!' || ch == L'-' || ch == L'_' || ch == L'(' || ch == L')' ||
+      ch == L'[' || ch == L']' || ch == L'{' || ch == L'}' || ch == L'"' ||
+      ch == L'\'' || ch == L'/' || ch == L'\\' || ch == L'*' || ch == L'#' ||
+      ch == L'@' || ch == L'$' || ch == L'%' || ch == L'^' || ch == L'&' ||
+      ch == L'+' || ch == L'=' || ch == L'~' || ch == L'`' || ch == L'|' ||
+      ch == L'<' || ch == L'>')
     return true;
   return false;
 }
 
-// 文本是否包含至少一个“有意义”字符（非纯标点/空格），用于避免仅输入符号时误入 LLM 预测模式
+// 文本是否包含至少一个“有意义”字符（非纯标点/空格），用于避免仅输入符号时误入
+// LLM 预测模式
 static bool CommitHasMeaningfulContent(const std::wstring& text) {
   for (wchar_t ch : text) {
     if (!IsSeparatorOrPunctuation(ch))
       return true;
   }
   return false;
+}
+
+static int GetShortPhrasePriority(const std::wstring& candidate) {
+  const size_t len = candidate.size();
+  if (len >= 2 && len <= 4)
+    return 0;
+  if (len == 5)
+    return 1;
+  if (len == 1 || len == 6)
+    return 2;
+  return 3;
+}
+
+static void PrioritizeShortPinyinCandidates(
+    std::vector<std::wstring>& candidates) {
+  std::stable_sort(candidates.begin(), candidates.end(),
+                   [](const std::wstring& lhs, const std::wstring& rhs) {
+                     const int lhs_priority = GetShortPhrasePriority(lhs);
+                     const int rhs_priority = GetShortPhrasePriority(rhs);
+                     if (lhs_priority != rhs_priority) {
+                       return lhs_priority < rhs_priority;
+                     }
+                     if (lhs.size() != rhs.size()) {
+                       return lhs.size() < rhs.size();
+                     }
+                     return false;
+                   });
+}
+
+static bool ContainsCjkIdeograph(const std::wstring& text) {
+  for (wchar_t ch : text) {
+    if ((ch >= 0x3400 && ch <= 0x4DBF) || (ch >= 0x4E00 && ch <= 0x9FFF) ||
+        (ch >= 0xF900 && ch <= 0xFAFF)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool ContainsAsciiAlpha(const std::wstring& text) {
+  for (wchar_t ch : text) {
+    if ((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static std::wstring NormalizePinyinInputForComparison(
+    const std::wstring& text) {
+  std::wstring normalized;
+  normalized.reserve(text.size());
+  for (wchar_t ch : text) {
+    if ((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z')) {
+      normalized.push_back(static_cast<wchar_t>(std::towlower(ch)));
+    }
+  }
+  return normalized;
+}
+
+static void FilterPinyinGeneratedCandidates(
+    std::vector<std::wstring>& candidates,
+    const std::wstring& current_input) {
+  const std::wstring normalized_input =
+      NormalizePinyinInputForComparison(current_input);
+  candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                  [&](const std::wstring& candidate) {
+                                    if (candidate.empty()) {
+                                      return true;
+                                    }
+                                    if (!ContainsCjkIdeograph(candidate)) {
+                                      return true;
+                                    }
+                                    if (ContainsAsciiAlpha(candidate)) {
+                                      return true;
+                                    }
+                                    return !normalized_input.empty() &&
+                                           NormalizePinyinInputForComparison(
+                                               candidate) == normalized_input;
+                                  }),
+                   candidates.end());
 }
 
 // 包含 ContextHistory 的完整定义（需要调用其方法）
@@ -106,12 +187,16 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
       m_context_history(nullptr),
       m_dev_console(nullptr),
       m_llm_provider(nullptr),
+      m_pinyin_rerank_provider(nullptr),
       m_llm_prediction_mode(false),
+      m_current_llm_rerank_ui_update_not_before(0),
       m_pending_llm_commit(L""),
       m_current_llm_candidates_require_rime(false),
       m_current_llm_candidates_enable_rime_reorder(false),
       m_current_llm_candidates_prefer_primary(false),
+      m_current_llm_candidates_from_no_input(false),
       m_llm_developer_mode(false),
+      m_llm_enable_pinyin_constraint(true),
       m_llm_context_recent_words(50),
       m_llm_context_max_chars(0),
       m_llm_input_prediction_debounce_ms(120),
@@ -229,6 +314,13 @@ void RimeWithWeaselHandler::Initialize() {
     } else {
       m_llm_developer_mode = false;
     }
+    Bool llm_enable_pinyin_constraint = true;
+    if (rime_api->config_get_bool(&config, "llm/enable_pinyin_constraint",
+                                  &llm_enable_pinyin_constraint)) {
+      m_llm_enable_pinyin_constraint = !!llm_enable_pinyin_constraint;
+    } else {
+      m_llm_enable_pinyin_constraint = true;
+    }
     int llm_context_recent_words = 50;
     if (rime_api->config_get_int(&config, "llm/context_recent_words",
                                  &llm_context_recent_words) &&
@@ -240,7 +332,7 @@ void RimeWithWeaselHandler::Initialize() {
     }
     int llm_context_max_chars = 0;
     if (rime_api->config_get_int(&config, "llm/context_max_chars",
-                                  &llm_context_max_chars) &&
+                                 &llm_context_max_chars) &&
         llm_context_max_chars >= 0) {
       m_llm_context_max_chars = static_cast<size_t>(llm_context_max_chars);
     } else {
@@ -267,7 +359,7 @@ void RimeWithWeaselHandler::Initialize() {
                                   &m_show_notifications_time))
       m_show_notifications_time = 1200;
     _LoadAppOptions(&config, m_app_options);
-    
+
     // 初始化LLM Provider (注意：此时m_dev_console可能还未初始化)
     Bool llm_enabled = false;
     if (rime_api->config_get_bool(&config, "llm/enabled", &llm_enabled)) {
@@ -276,10 +368,11 @@ void RimeWithWeaselHandler::Initialize() {
         const int BUF_SIZE = 64;
         char provider_type_buf[BUF_SIZE + 1] = {0};
         std::string provider_type = "openai";  // 默认值
-        if (rime_api->config_get_string(&config, "llm/provider_type", provider_type_buf, BUF_SIZE)) {
+        if (rime_api->config_get_string(&config, "llm/provider_type",
+                                        provider_type_buf, BUF_SIZE)) {
           provider_type = provider_type_buf;
         }
-        
+
         // 根据 provider_type 创建相应的 provider
         if (provider_type == "llamacpp") {
           m_llm_provider = std::make_unique<LlamaCppProvider>();
@@ -290,14 +383,16 @@ void RimeWithWeaselHandler::Initialize() {
         } else {
           // 默认使用 OpenAICompatibleProvider
           m_llm_provider = std::make_unique<OpenAICompatibleProvider>();
-          LOG(INFO) << "LLM Provider type: " << provider_type << " (defaulting to openai)";
+          LOG(INFO) << "LLM Provider type: " << provider_type
+                    << " (defaulting to openai)";
         }
-        
+
         if (m_llm_provider->LoadConfig("weasel")) {
           LOG(INFO) << "LLM Provider initialized successfully: "
                     << m_llm_provider->GetProviderName();
         } else {
-          LOG(ERROR) << "LLM Provider initialization failed: LoadConfig returned false";
+          LOG(ERROR) << "LLM Provider initialization failed: LoadConfig "
+                        "returned false";
           LOG(ERROR) << "Please check your weasel.yaml configuration:";
           if (provider_type == "llamacpp") {
             LOG(ERROR) << "  llm:";
@@ -310,7 +405,8 @@ void RimeWithWeaselHandler::Initialize() {
             LOG(ERROR) << "    enabled: true";
             LOG(ERROR) << "    provider_type: hf_constraint";
             LOG(ERROR) << "    hf_constraint:";
-            LOG(ERROR) << "      api_url: \"http://localhost:8000/v1/generate/completions\"";
+            LOG(ERROR) << "      api_url: "
+                          "\"http://localhost:8000/v1/generate/completions\"";
           } else {
             LOG(ERROR) << "  llm:";
             LOG(ERROR) << "    enabled: true";
@@ -320,13 +416,24 @@ void RimeWithWeaselHandler::Initialize() {
           }
           m_llm_provider.reset();
         }
+
+        m_pinyin_rerank_provider = std::make_unique<AlphaRerankProvider>();
+        if (m_pinyin_rerank_provider->LoadConfig("weasel")) {
+          LOG(INFO) << "Pinyin rerank provider initialized successfully: "
+                    << m_pinyin_rerank_provider->GetProviderName();
+        } else {
+          LOG(WARNING)
+              << "Pinyin rerank provider is unavailable; pinyin realtime "
+                 "rerank will be skipped";
+          m_pinyin_rerank_provider.reset();
+        }
       } else {
         LOG(INFO) << "LLM is disabled in configuration (llm/enabled = false)";
       }
     } else {
       LOG(INFO) << "LLM configuration not found (llm/enabled not set)";
     }
-    
+
     rime_api->config_close(&config);
   }
   m_last_schema_id.clear();
@@ -454,19 +561,66 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
              << ", mask = " << keyEvent.mask << ", ipc_id = " << ipc_id;
   if (m_disabled)
     return FALSE;
-  
+
+  if (!(keyEvent.mask & ibus::Modifier::RELEASE_MASK)) {
+    _NoteUserActivity();
+  }
+
   RimeSessionId session_id = to_session_id(ipc_id);
+  bool was_composing = false;
+  RIME_STRUCT(RimeStatus, initial_status);
+  if (rime_api->get_status(session_id, &initial_status)) {
+    was_composing = !!initial_status.is_composing;
+    rime_api->free_status(&initial_status);
+  }
   const DWORD event_time = GetTickCount();
+  const bool is_key_press = !(keyEvent.mask & ibus::Modifier::RELEASE_MASK);
   const bool is_destructive_edit_key =
-      !(keyEvent.mask & ibus::Modifier::RELEASE_MASK) &&
-      (keyEvent.keycode == ibus::Keycode::BackSpace ||
-       keyEvent.keycode == ibus::Keycode::Delete);
+      is_key_press && (keyEvent.keycode == ibus::Keycode::BackSpace ||
+                       keyEvent.keycode == ibus::Keycode::Delete);
+  const bool is_cursor_motion_key =
+      is_key_press && (keyEvent.keycode == ibus::Keycode::Left ||
+                       keyEvent.keycode == ibus::Keycode::Right ||
+                       keyEvent.keycode == ibus::Keycode::Home ||
+                       keyEvent.keycode == ibus::Keycode::End);
   const bool is_composition_edit_key =
-      !(keyEvent.mask & ibus::Modifier::RELEASE_MASK) &&
-      (((keyEvent.keycode >= 'a' && keyEvent.keycode <= 'z') ||
-        (keyEvent.keycode >= 'A' && keyEvent.keycode <= 'Z') ||
-        keyEvent.keycode == '\'') ||
-       is_destructive_edit_key);
+      is_key_press && (((keyEvent.keycode >= 'a' && keyEvent.keycode <= 'z') ||
+                        (keyEvent.keycode >= 'A' && keyEvent.keycode <= 'Z') ||
+                        keyEvent.keycode == '\'') ||
+                       is_destructive_edit_key || is_cursor_motion_key);
+  const bool is_pinyin_text_key =
+      is_key_press && (((keyEvent.keycode >= 'a' && keyEvent.keycode <= 'z') ||
+                        (keyEvent.keycode >= 'A' && keyEvent.keycode <= 'Z') ||
+                        keyEvent.keycode == '\''));
+  const bool is_candidate_selection_digit_key =
+      is_key_press && ((keyEvent.keycode >= '0' && keyEvent.keycode <= '9') ||
+                       (keyEvent.keycode >= ibus::Keycode::KP_0 &&
+                        keyEvent.keycode <= ibus::Keycode::KP_9));
+  bool has_active_no_input_prediction = false;
+  {
+    std::lock_guard<std::mutex> lock(m_llm_mutex);
+    has_active_no_input_prediction = m_llm_prediction_mode &&
+                                     m_current_llm_candidates_from_no_input &&
+                                     !m_current_llm_candidates.empty();
+  }
+
+  if (is_key_press && has_active_no_input_prediction &&
+      !is_candidate_selection_digit_key) {
+    if (m_dev_console && m_dev_console->IsEnabled()) {
+      m_dev_console->WriteLine(L"[LLM] 检测到按键输入，立即隐藏无拼音预测候选");
+    }
+    _ExitLLMPredictionMode(ipc_id, true);
+    has_active_no_input_prediction = false;
+  }
+
+  if (is_pinyin_text_key && m_llm_prediction_mode &&
+      !has_active_no_input_prediction) {
+    if (m_dev_console && m_dev_console->IsEnabled()) {
+      m_dev_console->WriteLine(
+          L"[LLM] 检测到新的拼音输入，立即清除上一轮重排/生成候补");
+    }
+    _ExitLLMPredictionMode(ipc_id, false);
+  }
 
   if (is_composition_edit_key) {
     if (m_last_edit_key_time > 0 &&
@@ -477,7 +631,7 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
     }
     m_last_edit_key_time = event_time;
 
-    if (is_destructive_edit_key ||
+    if (is_destructive_edit_key || is_cursor_motion_key ||
         m_consecutive_edit_key_count >= LLM_EDIT_BURST_THRESHOLD) {
       const DWORD suppress_until = event_time + LLM_RERANK_SUPPRESS_MS;
       if (suppress_until > m_llm_rerank_suppressed_until) {
@@ -485,7 +639,9 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
         if (m_dev_console && m_dev_console->IsEnabled()) {
           std::wstringstream ss;
           ss << L"[LLM] 检测到"
-             << (is_destructive_edit_key ? L"退格/删除" : L"连续编辑")
+             << (is_destructive_edit_key
+                     ? L"退格/删除"
+                     : (is_cursor_motion_key ? L"光标移动" : L"连续编辑"))
              << L"，在接下来 " << LLM_RERANK_SUPPRESS_MS
              << L" ms 内禁止 rerank";
           m_dev_console->WriteLine(ss.str());
@@ -493,19 +649,19 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       }
     }
   }
-  
+
   // 处理·键（反引号键）：触发LLM预测（仅在composing状态下）或清空上下文（双击）
   if (!(keyEvent.mask & ibus::Modifier::RELEASE_MASK) &&
       (keyEvent.keycode == ibus::Keycode::grave || keyEvent.keycode == 0x060)) {
     bool is_double_click = false;
-    
+
     // 检测双击（500ms内连续按下两次）
-    if (m_last_grave_key_time > 0 && 
+    if (m_last_grave_key_time > 0 &&
         (event_time - m_last_grave_key_time) < GRAVE_DOUBLE_CLICK_TIMEOUT) {
       is_double_click = true;
     }
     m_last_grave_key_time = event_time;
-    
+
     if (m_dev_console && m_dev_console->IsEnabled()) {
       if (is_double_click) {
         m_dev_console->WriteLine(L"[LLM] 检测到双击·键");
@@ -513,15 +669,11 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
         m_dev_console->WriteLine(L"[LLM] 用户按下·键");
       }
     }
-    
+
     // 双击·键：清空上下文历史记录
     if (is_double_click) {
       if (m_context_history) {
-        if (m_dev_console && m_dev_console->IsEnabled()) {
-          size_t size_before = m_context_history->GetSize();
-          m_dev_console->WriteLine(L"[LLM] 双击·键，清空上下文历史记录（清空前记录数: " + std::to_wstring(size_before) + L"）");
-        }
-        m_context_history->Clear(m_dev_console);
+        _ClearContextHistory(L"双击·键手动清空");
         if (m_dev_console && m_dev_console->IsEnabled()) {
           m_dev_console->WriteLine(L"[LLM] 上下文历史记录已清空");
         }
@@ -533,7 +685,7 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       // 清空上下文后，阻止按键继续传递
       return TRUE;
     }
-    
+
     // 检查是否处于composing状态
     RIME_STRUCT(RimeStatus, status);
     bool is_composing = false;
@@ -541,7 +693,7 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       is_composing = !!status.is_composing;
       rime_api->free_status(&status);
     }
-    
+
     // 只有在composing状态下才触发LLM预测，否则让·键正常输入
     if (!is_composing) {
       if (m_dev_console && m_dev_console->IsEnabled()) {
@@ -554,7 +706,8 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       if (!m_llm_provider) {
         if (m_dev_console && m_dev_console->IsEnabled()) {
           m_dev_console->WriteLine(L"[LLM] LLM提供者未初始化");
-          m_dev_console->WriteLine(L"[LLM] 请检查weasel.yaml配置文件中是否启用了LLM功能：");
+          m_dev_console->WriteLine(
+              L"[LLM] 请检查weasel.yaml配置文件中是否启用了LLM功能：");
           m_dev_console->WriteLine(L"[LLM]   llm:");
           m_dev_console->WriteLine(L"[LLM]     enabled: true");
           m_dev_console->WriteLine(L"[LLM]     openai:");
@@ -567,36 +720,48 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
           m_dev_console->WriteLine(L"[LLM] LLM提供者已初始化，但不可用");
           m_dev_console->WriteLine(L"[LLM] 可能的原因：");
           m_dev_console->WriteLine(L"[LLM]   1. llm/enabled 未设置为 true");
-          m_dev_console->WriteLine(L"[LLM]   2. llm/openai/api_key 未配置或为空");
-          m_dev_console->WriteLine(L"[LLM]   3. llm/openai/api_url 未配置或为空");
+          m_dev_console->WriteLine(
+              L"[LLM]   2. llm/openai/api_key 未配置或为空");
+          m_dev_console->WriteLine(
+              L"[LLM]   3. llm/openai/api_url 未配置或为空");
         }
         // 不阻止按键，让Rime正常处理
         // 继续执行后续代码
       } else {
-        // LLM 可用，但只有在已经给出传统候选且 1 秒内未选词时才触发。
+        // LLM 可用；手动触发走快速路径，普通输入则等待空闲窗口后再触发。
         if (m_dev_console && m_dev_console->IsEnabled()) {
           m_dev_console->WriteLine(
-              L"[LLM] composing状态=true，检查是否满足传统候选空闲 1 秒后触发 LLM");
+              L"[LLM] composing状态=true，开始检查当前输入是否满足 LLM "
+              L"触发条件");
         }
 
-        if (_TryScheduleLLMForCurrentComposition(
-                ipc_id, session_id, event_time, true)) {
+        if (_TryScheduleLLMForCurrentComposition(ipc_id, session_id, event_time,
+                                                 true)) {
           return TRUE;
         }
       }
     }
   }
-  
+
   if (is_destructive_edit_key && m_llm_prediction_mode) {
     if (m_dev_console && m_dev_console->IsEnabled()) {
       m_dev_console->WriteLine(
           L"[LLM] 检测到退格/删除操作，退出LLM预测模式以降低编辑时开销");
     }
-    _ExitLLMPredictionMode(ipc_id);
+    _ExitLLMPredictionMode(ipc_id, has_active_no_input_prediction);
+  }
+
+  if (is_cursor_motion_key && m_llm_prediction_mode) {
+    if (m_dev_console && m_dev_console->IsEnabled()) {
+      m_dev_console->WriteLine(
+          L"[LLM] 检测到光标移动操作，退出LLM预测模式并交还给 Rime 处理");
+    }
+    _ExitLLMPredictionMode(ipc_id, false);
   }
 
   // 如果处于LLM预测模式，处理特殊按键
-  if (m_llm_prediction_mode && !(keyEvent.mask & ibus::Modifier::RELEASE_MASK)) {
+  if (m_llm_prediction_mode &&
+      !(keyEvent.mask & ibus::Modifier::RELEASE_MASK)) {
     // ESC键：退出LLM预测模式
     if (keyEvent.keycode == ibus::Keycode::Escape) {
       _ExitLLMPredictionMode(ipc_id);
@@ -633,11 +798,8 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       if (has_context) {
         rime_api->free_context(&ctx);
       }
-      if (_SelectDisplayCandidate(
-              display_candidates[display_index],
-              llm_snapshot.candidates,
-              ipc_id,
-              eat)) {
+      if (_SelectDisplayCandidate(display_candidates[display_index],
+                                  llm_snapshot.candidates, ipc_id, eat)) {
         return TRUE;
       }
     }
@@ -645,17 +807,8 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
     if (has_context) {
       rime_api->free_context(&ctx);
     }
-    
-    // 如果输入的是拼音（字母），退出LLM预测模式，回到正常输入
-    if ((keyEvent.keycode >= 'a' && 
-         keyEvent.keycode <= 'z') ||
-        (keyEvent.keycode >= 'A' && 
-         keyEvent.keycode <= 'Z')) {
-      _ExitLLMPredictionMode(ipc_id);
-      // 继续处理按键，进入正常输入流程
-    }
   }
-  
+
   m_has_display_highlight_override = false;
   Bool handled = rime_api->process_key(session_id, keyEvent.keycode,
                                        expand_ibus_modifier(keyEvent.mask));
@@ -675,17 +828,19 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
   }
 
   const bool should_auto_predict_input =
-      !(keyEvent.mask & ibus::Modifier::RELEASE_MASK) &&
-      handled &&
-      m_llm_provider && m_llm_provider->IsAvailable() &&
-      keyEvent.keycode != ibus::Keycode::grave &&
-      keyEvent.keycode != 0x060 &&
+      !(keyEvent.mask & ibus::Modifier::RELEASE_MASK) && handled &&
+      keyEvent.keycode != ibus::Keycode::grave && keyEvent.keycode != 0x060 &&
       (((keyEvent.keycode >= 'a' && keyEvent.keycode <= 'z') ||
         (keyEvent.keycode >= 'A' && keyEvent.keycode <= 'Z') ||
         keyEvent.keycode == '\''));
   if (should_auto_predict_input) {
-    _TryScheduleLLMForCurrentComposition(
-        ipc_id, session_id, event_time, false);
+    _TryScheduleLLMForCurrentComposition(ipc_id, session_id, event_time, false);
+  }
+
+  if (!(keyEvent.mask & ibus::Modifier::RELEASE_MASK) &&
+      keyEvent.keycode == ibus::Keycode::BackSpace && !was_composing &&
+      m_context_history) {
+    m_context_history->RemoveRecentText(1, m_dev_console);
   }
 
   _Respond(ipc_id, eat);
@@ -698,6 +853,7 @@ void RimeWithWeaselHandler::CommitComposition(WeaselSessionId ipc_id) {
   DLOG(INFO) << "Commit composition: ipc_id = " << ipc_id;
   if (m_disabled)
     return;
+  _NoteUserActivity();
   rime_api->commit_composition(to_session_id(ipc_id));
   _UpdateUI(ipc_id);
   m_active_session = ipc_id;
@@ -707,6 +863,7 @@ void RimeWithWeaselHandler::ClearComposition(WeaselSessionId ipc_id) {
   DLOG(INFO) << "Clear composition: ipc_id = " << ipc_id;
   if (m_disabled)
     return;
+  _NoteUserActivity();
   rime_api->clear_composition(to_session_id(ipc_id));
   _UpdateUI(ipc_id);
   m_active_session = ipc_id;
@@ -719,10 +876,11 @@ void RimeWithWeaselHandler::SelectCandidateOnCurrentPage(
              << ", index = " << index;
   LOG(INFO) << "[DEBUG] SelectCandidateOnCurrentPage called: index=" << index
             << ", ipc_id=" << ipc_id << ", llm_mode=" << m_llm_prediction_mode;
-  
+
   if (m_disabled)
     return;
-  
+
+  _NoteUserActivity();
   RimeSessionId session_id = to_session_id(ipc_id);
 
   if (m_llm_prediction_mode) {
@@ -734,27 +892,21 @@ void RimeWithWeaselHandler::SelectCandidateOnCurrentPage(
       rime_api->free_context(&ctx);
 
       if (index < display_candidates.size() &&
-          _SelectDisplayCandidate(
-              display_candidates[index],
-              llm_snapshot.candidates,
-              ipc_id,
-              EatLine())) {
+          _SelectDisplayCandidate(display_candidates[index],
+                                  llm_snapshot.candidates, ipc_id, EatLine())) {
         return;
       }
     } else if (!llm_snapshot.candidates.empty()) {
       const auto display_candidates =
           _BuildDisplayCandidates(nullptr, llm_snapshot);
       if (index < display_candidates.size() &&
-          _SelectDisplayCandidate(
-              display_candidates[index],
-              llm_snapshot.candidates,
-              ipc_id,
-              EatLine())) {
+          _SelectDisplayCandidate(display_candidates[index],
+                                  llm_snapshot.candidates, ipc_id, EatLine())) {
         return;
       }
     }
   }
-  
+
   // 如果不是LLM候选词或不在LLM模式，按照正常流程处理Rime候选词
   LOG(INFO) << "[DEBUG] Processing as Rime candidate";
   rime_api->select_candidate_on_current_page(session_id, index);
@@ -767,6 +919,7 @@ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
   DLOG(INFO) << "highlight candidate on current page, ipc_id = " << ipc_id
              << ", index = " << index;
   bool res = false;
+  _NoteUserActivity();
 
   if (m_llm_prediction_mode) {
     auto llm_snapshot = _SnapshotLLMCandidates();
@@ -801,8 +954,8 @@ bool RimeWithWeaselHandler::HighlightCandidateOnCurrentPage(
 
   if (!m_llm_prediction_mode || !res) {
     m_has_display_highlight_override = false;
-    res = rime_api->highlight_candidate_on_current_page(
-        to_session_id(ipc_id), index);
+    res = rime_api->highlight_candidate_on_current_page(to_session_id(ipc_id),
+                                                        index);
   }
 
   _Respond(ipc_id, eat);
@@ -815,6 +968,7 @@ bool RimeWithWeaselHandler::ChangePage(bool backward,
                                        EatLine eat) {
   DLOG(INFO) << "change page, ipc_id = " << ipc_id
              << (backward ? "backward" : "foreward");
+  _NoteUserActivity();
   m_has_display_highlight_override = false;
   bool res = rime_api->change_page(to_session_id(ipc_id), backward);
   _Respond(ipc_id, eat);
@@ -827,18 +981,25 @@ void RimeWithWeaselHandler::FocusIn(DWORD client_caps, WeaselSessionId ipc_id) {
              << ", client_caps = " << client_caps;
   if (m_disabled)
     return;
+  _NoteUserActivity();
+  if (m_active_session != 0 && m_active_session != ipc_id) {
+    _ClearContextHistory(L"切换到新的输入会话");
+  }
   _UpdateUI(ipc_id);
   m_active_session = ipc_id;
 }
 
 void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
   DLOG(INFO) << "Focus out: ipc_id = " << ipc_id;
-  
+  _NoteUserActivity();
+
   // 退出LLM预测模式（如果处于该模式）
   if (m_llm_prediction_mode) {
     _ExitLLMPredictionMode(ipc_id);
   }
-  
+
+  _ClearContextHistory(L"输入焦点离开");
+
   if (m_ui)
     m_ui->Hide();
   m_active_session = 0;
@@ -853,6 +1014,7 @@ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
     m_ui->UpdateInputPosition(rc);
   if (m_disabled)
     return;
+
   if (m_active_session != ipc_id) {
     _UpdateUI(ipc_id);
     m_active_session = ipc_id;
@@ -944,10 +1106,21 @@ RimeWithWeaselHandler::_SnapshotLLMCandidates() {
   std::lock_guard<std::mutex> lock(m_llm_mutex);
   snapshot.candidates = m_current_llm_candidates;
   snapshot.rerank_candidates = m_current_llm_rerank_candidates;
+  snapshot.rerank_indices = m_current_llm_rerank_indices;
   snapshot.require_rime_candidates = m_current_llm_candidates_require_rime;
   snapshot.enable_rime_reorder = m_current_llm_candidates_enable_rime_reorder;
   snapshot.prefer_llm_primary = m_current_llm_candidates_prefer_primary;
+  snapshot.rerank_ui_update_not_before =
+      m_current_llm_rerank_ui_update_not_before;
   return snapshot;
+}
+
+bool RimeWithWeaselHandler::_HasLLMDisplayCandidates(
+    const LLMCandidateSnapshot& llm_snapshot) const {
+  return m_llm_prediction_mode && (!llm_snapshot.candidates.empty() ||
+                                   (llm_snapshot.enable_rime_reorder &&
+                                    (!llm_snapshot.rerank_indices.empty() ||
+                                     !llm_snapshot.rerank_candidates.empty())));
 }
 
 std::vector<RimeWithWeaselHandler::DisplayCandidate>
@@ -969,79 +1142,92 @@ RimeWithWeaselHandler::_BuildDisplayCandidates(
 
   std::vector<bool> used_rime_candidates(rime_candidate_count, false);
   std::vector<std::wstring> emitted_extra_llm_candidates;
-  const auto& rerank_candidates =
-      llm_snapshot.rerank_candidates.empty() ? llm_candidates
-                                             : llm_snapshot.rerank_candidates;
+  const bool rerank_ui_allowed =
+      llm_snapshot.rerank_ui_update_not_before == 0 ||
+      GetTickCount64() >= llm_snapshot.rerank_ui_update_not_before;
+  const bool use_rerank_candidates = llm_snapshot.enable_rime_reorder &&
+                                     rerank_ui_allowed &&
+                                     (!llm_snapshot.rerank_indices.empty() ||
+                                      !llm_snapshot.rerank_candidates.empty());
 
-  auto try_add_llm_candidate =
-      [&](size_t llm_index, bool matched_by_llm, bool allow_unmatched_llm) {
-        if (llm_index >= llm_candidates.size()) {
-          return;
-        }
-        const std::wstring& llm_candidate = llm_candidates[llm_index];
-        if (llm_candidate.empty()) {
-          return;
-        }
-        if (std::find(emitted_extra_llm_candidates.begin(),
-                      emitted_extra_llm_candidates.end(),
-                      llm_candidate) != emitted_extra_llm_candidates.end()) {
-          return;
-        }
+  auto try_add_candidate_by_text = [&](const std::wstring& candidate_text,
+                                       bool matched_by_llm,
+                                       bool allow_unmatched_llm) {
+    if (candidate_text.empty()) {
+      return;
+    }
+    if (std::find(emitted_extra_llm_candidates.begin(),
+                  emitted_extra_llm_candidates.end(),
+                  candidate_text) != emitted_extra_llm_candidates.end()) {
+      return;
+    }
 
-        for (size_t rime_index = 0; rime_index < rime_candidate_count; ++rime_index) {
-          if (used_rime_candidates[rime_index] || ctx == nullptr) {
-            continue;
-          }
-          if (llm_candidate == u8tow(ctx->menu.candidates[rime_index].text)) {
-            display_candidates.push_back(
-                {DisplayCandidate::Source::Rime, rime_index, true});
-            used_rime_candidates[rime_index] = true;
-            emitted_extra_llm_candidates.push_back(llm_candidate);
-            return;
-          }
-        }
+    for (size_t rime_index = 0; rime_index < rime_candidate_count;
+         ++rime_index) {
+      if (used_rime_candidates[rime_index] || ctx == nullptr) {
+        continue;
+      }
+      if (candidate_text == u8tow(ctx->menu.candidates[rime_index].text)) {
+        display_candidates.push_back(
+            {DisplayCandidate::Source::Rime, rime_index, matched_by_llm});
+        used_rime_candidates[rime_index] = true;
+        emitted_extra_llm_candidates.push_back(candidate_text);
+        return;
+      }
+    }
 
-        if (!allow_unmatched_llm) {
-          return;
-        }
+    if (!allow_unmatched_llm) {
+      return;
+    }
 
+    for (size_t llm_index = 0; llm_index < llm_candidates.size(); ++llm_index) {
+      if (candidate_text == llm_candidates[llm_index]) {
         display_candidates.push_back(
             {DisplayCandidate::Source::LLM, llm_index, matched_by_llm});
-        emitted_extra_llm_candidates.push_back(llm_candidate);
-      };
+        emitted_extra_llm_candidates.push_back(candidate_text);
+        return;
+      }
+    }
+  };
+
+  auto try_add_llm_candidate = [&](size_t llm_index, bool matched_by_llm,
+                                   bool allow_unmatched_llm) {
+    if (llm_index >= llm_candidates.size()) {
+      return;
+    }
+    try_add_candidate_by_text(llm_candidates[llm_index], matched_by_llm,
+                              allow_unmatched_llm);
+  };
 
   if (m_llm_prediction_mode && llm_snapshot.prefer_llm_primary &&
       !llm_candidates.empty()) {
     for (size_t llm_index = 0; llm_index < llm_candidates.size(); ++llm_index) {
-      try_add_llm_candidate(llm_index, true, false);
+      try_add_llm_candidate(llm_index, true, true);
     }
   }
 
-  if (m_llm_prediction_mode && llm_snapshot.enable_rime_reorder &&
-      !rerank_candidates.empty()) {
-    for (const std::wstring& llm_candidate : rerank_candidates) {
-      if (llm_candidate.empty()) {
-        continue;
-      }
-
-      bool matched_rime_candidate = false;
-      for (size_t rime_index = 0; rime_index < rime_candidate_count;
-           ++rime_index) {
-        if (used_rime_candidates[rime_index] || ctx == nullptr) {
+  if (m_llm_prediction_mode && use_rerank_candidates &&
+      !llm_snapshot.prefer_llm_primary) {
+    bool used_indices = false;
+    if (!llm_snapshot.rerank_indices.empty() && ctx != nullptr) {
+      for (size_t rerank_index : llm_snapshot.rerank_indices) {
+        if (rerank_index >= rime_candidate_count ||
+            used_rime_candidates[rerank_index]) {
           continue;
         }
-
-        if (llm_candidate == u8tow(ctx->menu.candidates[rime_index].text)) {
-          display_candidates.push_back(
-              {DisplayCandidate::Source::Rime, rime_index, true});
-          used_rime_candidates[rime_index] = true;
-          matched_rime_candidate = true;
-          break;
-        }
+        display_candidates.push_back(
+            {DisplayCandidate::Source::Rime, rerank_index, true});
+        used_rime_candidates[rerank_index] = true;
+        emitted_extra_llm_candidates.push_back(
+            u8tow(ctx->menu.candidates[rerank_index].text));
+        used_indices = true;
       }
+    }
 
-      if (matched_rime_candidate) {
-        continue;
+    if (!used_indices) {
+      for (const std::wstring& candidate_text :
+           llm_snapshot.rerank_candidates) {
+        try_add_candidate_by_text(candidate_text, true, true);
       }
     }
   }
@@ -1050,18 +1236,21 @@ RimeWithWeaselHandler::_BuildDisplayCandidates(
     if (!used_rime_candidates[rime_index]) {
       display_candidates.push_back(
           {DisplayCandidate::Source::Rime, rime_index, false});
+      used_rime_candidates[rime_index] = true;
     }
   }
 
   if (m_llm_prediction_mode && !llm_candidates.empty() &&
-      !llm_snapshot.require_rime_candidates && llm_snapshot.prefer_llm_primary) {
+      !llm_snapshot.require_rime_candidates &&
+      llm_snapshot.prefer_llm_primary) {
     for (size_t llm_index = 0; llm_index < llm_candidates.size(); ++llm_index) {
       try_add_llm_candidate(llm_index, false, true);
     }
   }
 
   if (m_llm_prediction_mode && !llm_candidates.empty() &&
-      !llm_snapshot.require_rime_candidates && !llm_snapshot.prefer_llm_primary) {
+      !llm_snapshot.require_rime_candidates &&
+      !llm_snapshot.prefer_llm_primary) {
     for (size_t llm_index = 0; llm_index < llm_candidates.size(); ++llm_index) {
       try_add_llm_candidate(llm_index, false, true);
     }
@@ -1078,7 +1267,8 @@ std::wstring RimeWithWeaselHandler::_GetDisplayLabel(const RimeContext& ctx,
       return escape_string(u8tow(ctx.select_labels[display_index]));
     }
     if (ctx.menu.select_keys && ctx.menu.select_keys[display_index]) {
-      return escape_string(std::wstring(1, ctx.menu.select_keys[display_index]));
+      return escape_string(
+          std::wstring(1, ctx.menu.select_keys[display_index]));
     }
   }
   return std::to_wstring((display_index + 1) % 10);
@@ -1094,10 +1284,9 @@ bool RimeWithWeaselHandler::_TryResolveDisplaySelectionIndex(
   }
 
   if (ctx.menu.select_keys) {
-    for (size_t i = 0;
-         i < display_candidate_count &&
-         i < static_cast<size_t>(ctx.menu.num_candidates) &&
-         ctx.menu.select_keys[i];
+    for (size_t i = 0; i < display_candidate_count &&
+                       i < static_cast<size_t>(ctx.menu.num_candidates) &&
+                       ctx.menu.select_keys[i];
          ++i) {
       const wchar_t select_key =
           static_cast<unsigned char>(ctx.menu.select_keys[i]);
@@ -1178,6 +1367,7 @@ bool RimeWithWeaselHandler::_TryScheduleLLMForCurrentComposition(
     RimeSessionId session_id,
     DWORD event_time,
     bool triggered_by_grave_key) {
+  std::wstring current_input;
   std::wstring current_preedit;
   size_t rime_candidate_count = 0;
   RIME_STRUCT(RimeContext, ctx);
@@ -1189,55 +1379,84 @@ bool RimeWithWeaselHandler::_TryScheduleLLMForCurrentComposition(
     rime_api->free_context(&ctx);
   }
 
-  if (current_preedit.empty()) {
+  if (RIME_API_AVAILABLE(rime_api, get_input)) {
+    if (const char* raw_input = rime_api->get_input(session_id)) {
+      current_input = u8tow(raw_input);
+    }
+  }
+
+  if (current_input.empty()) {
+    current_input = current_preedit;
+  }
+
+  if (current_input.empty()) {
     if (m_dev_console && m_dev_console->IsEnabled()) {
       m_dev_console->WriteLine(
           triggered_by_grave_key
-              ? L"[LLM] `键触发时未获取到有效 preedit，跳过 LLM"
-              : L"[LLM] 当前 preedit 为空，跳过自动 LLM 触发");
+              ? L"[LLM] `键触发时未获取到有效输入串，跳过 LLM"
+              : L"[LLM] 当前输入串为空，跳过自动 LLM 触发");
     }
     return false;
   }
 
+  const bool require_rime_candidates = false;
+  const bool has_traditional_candidates = rime_candidate_count > 0;
+  const bool rerank_was_suppressed = event_time < m_llm_rerank_suppressed_until;
+  const bool has_pinyin_rerank_provider =
+      m_llm_enable_pinyin_constraint && m_pinyin_rerank_provider &&
+      m_pinyin_rerank_provider->IsAvailable();
+  if (!has_pinyin_rerank_provider) {
+    if (m_dev_console && m_dev_console->IsEnabled()) {
+      m_dev_console->WriteLine(
+          L"[LLM] 跳过有拼音 AI 处理：实时重排器未启用或不可用");
+    }
+    return false;
+  }
+  if (!has_traditional_candidates) {
+    if (m_dev_console && m_dev_console->IsEnabled()) {
+      m_dev_console->WriteLine(
+          L"[LLM] 跳过有拼音 AI 处理：当前没有可供重排的 Rime 候选");
+    }
+    return false;
+  }
   if (!m_llm_prediction_mode) {
     m_llm_prediction_mode = true;
   }
-
-  const bool require_rime_candidates = false;
-  const bool has_traditional_candidates = rime_candidate_count > 0;
-  const bool rerank_was_suppressed =
-      event_time < m_llm_rerank_suppressed_until;
-  const LLMRequestType request_type = LLMRequestType::PinyinConstrainedPrediction;
-  const DWORD debounce_ms = m_llm_input_prediction_debounce_ms;
+  const LLMRequestType request_type = LLMRequestType::RimeReorder;
+  DWORD debounce_ms = m_llm_input_prediction_debounce_ms;
+  if (!triggered_by_grave_key) {
+    debounce_ms = (std::max)(debounce_ms, LLM_INPUT_IDLE_TRIGGER_MS);
+  }
+  const uint64_t ui_update_not_before = 0;
 
   if (m_dev_console && m_dev_console->IsEnabled()) {
     std::wstringstream ss;
-    ss << L"[LLM] "
-       << (triggered_by_grave_key ? L"`键" : L"普通输入")
-       << L"触发 LLM 拼音候选生成，preedit=" << current_preedit
-       << L"，Rime候选=" << rime_candidate_count
-       << L"，首候选等待阈值=100 ms，请求防抖=" << debounce_ms
-       << L" ms，后续"
-       << (has_traditional_candidates ? L"可回退传统候选并完成后重排" : L"无传统候选可补足")
-       << L"，请求类型="
-       << GetLLMRequestTypeName(request_type)
-       << L"。";
+    ss << L"[LLM] " << (triggered_by_grave_key ? L"`键" : L"普通输入")
+       << L"触发 Alpha 实时重排" << L"，input=" << current_input;
+    if (!current_preedit.empty() && current_preedit != current_input) {
+      ss << L"，preedit=" << current_preedit;
+    }
+    ss << L"，Rime候选=" << rime_candidate_count
+       << L"，首候选等待阈值=100 ms，请求将在"
+       << (triggered_by_grave_key ? L"手动触发后等待 " : L"输入空闲 ")
+       << debounce_ms << L" ms 后发起"
+       << L"，仅对现有 Rime 候选做实时重排，请求类型="
+       << GetLLMRequestTypeName(request_type) << L"。";
     m_dev_console->WriteLine(ss.str());
   }
 
-  if (rerank_was_suppressed && has_traditional_candidates &&
-      m_dev_console && m_dev_console->IsEnabled()) {
+  if (rerank_was_suppressed && has_traditional_candidates && m_dev_console &&
+      m_dev_console->IsEnabled()) {
     std::wstringstream ss;
-    ss << L"[LLM] 当前处于连续编辑保护窗口内；生成完成后将跳过传统候选重排（剩余 "
+    ss << L"[LLM] "
+          L"当前处于连续编辑保护窗口内；生成完成后将跳过传统候选重排（剩余 "
        << (m_llm_rerank_suppressed_until - event_time) << L" ms）";
     m_dev_console->WriteLine(ss.str());
   }
 
-  _TriggerLLMPrediction(ipc_id,
-                        request_type,
-                        current_preedit,
-                        require_rime_candidates,
-                        debounce_ms);
+  _TriggerLLMPrediction(ipc_id, request_type, current_input,
+                        require_rime_candidates, debounce_ms,
+                        ui_update_not_before);
   return true;
 }
 
@@ -1245,8 +1464,7 @@ void RimeWithWeaselHandler::_GetCandidateInfo(CandidateInfo& cinfo,
                                               RimeContext& ctx) {
   const bool llm_mode = m_llm_prediction_mode;
   const auto llm_snapshot = _SnapshotLLMCandidates();
-  const auto display_candidates =
-      _BuildDisplayCandidates(&ctx, llm_snapshot);
+  const auto display_candidates = _BuildDisplayCandidates(&ctx, llm_snapshot);
   const auto& llm_candidates = llm_snapshot.candidates;
 
   cinfo.candies.clear();
@@ -1322,9 +1540,20 @@ void RimeWithWeaselHandler::_GetCandidateInfo(CandidateInfo& cinfo,
   if (m_dev_console && m_dev_console->IsEnabled()) {
     std::wstringstream ss;
     ss << L"[DEBUG] _GetCandidateInfo: Rime候选词数=" << ctx.menu.num_candidates
-       << L", LLM候选词数=" << llm_candidates.size()
-       << L", 展示候选词数=" << cinfo.candies.size();
+       << L", LLM候选词数=" << llm_candidates.size() << L", 展示候选词数="
+       << cinfo.candies.size();
     m_dev_console->WriteLine(ss.str());
+
+    if (!cinfo.candies.empty()) {
+      std::wstring display_order;
+      for (size_t i = 0; i < cinfo.candies.size(); ++i) {
+        if (i > 0) {
+          display_order += L" | ";
+        }
+        display_order += cinfo.candies[i].str;
+      }
+      m_dev_console->WriteLine(L"[LLM] 最终展示顺序: " + display_order);
+    }
   }
 }
 
@@ -1387,7 +1616,7 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
   // 准备状态和上下文
   Status& weasel_status = m_ui->status();
   Context weasel_context;
-  
+
   if (ipc_id == 0) {
     weasel_status.disabled = m_disabled;
   }
@@ -1399,10 +1628,10 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
   // - 非TSF模式：总是获取
   // - 有LLM候选词时：无论是否TSF，都需要获取，以便在_UI中合并Rime+LLM候选
   const bool has_llm_candidates =
-      m_llm_prediction_mode && !_SnapshotLLMCandidates().candidates.empty();
+      _HasLLMDisplayCandidates(_SnapshotLLMCandidates());
 
   bool need_context = !is_tsf || has_llm_candidates;
-  
+
   if (need_context) {
     _GetContext(weasel_context, session_id);
   }
@@ -1420,7 +1649,7 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
   // 条件2：LLM预测模式且有候选词
   bool should_show_ui =
       (weasel_status.composing && !is_tsf) || !weasel_context.cinfo.empty();
-  
+
   if (should_show_ui) {
     // 显示UI
     m_ui->Update(weasel_context, weasel_status);
@@ -1428,11 +1657,11 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
   } else {
     // 检查是否有消息需要显示
     bool has_message = _ShowMessage(weasel_context, weasel_status);
-    
+
     // 如果没有消息且非TSF模式，隐藏UI
     if (!has_message && !is_tsf) {
-    m_ui->Hide();
-    m_ui->Update(weasel_context, weasel_status);
+      m_ui->Hide();
+      m_ui->Update(weasel_context, weasel_status);
     }
   }
 
@@ -1445,7 +1674,6 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
   m_message_label.clear();
   m_option_name.clear();
 }
-
 
 // void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
 //   // if m_ui nullptr, _UpdateUI meaningless
@@ -1612,7 +1840,8 @@ void RimeWithWeaselHandler::_LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
 
 std::wstring RimeWithWeaselHandler::_TrimPredictionContext(
     const std::wstring& context) const {
-  if (m_llm_context_max_chars == 0 || context.size() <= m_llm_context_max_chars) {
+  if (m_llm_context_max_chars == 0 ||
+      context.size() <= m_llm_context_max_chars) {
     return context;
   }
 
@@ -1780,7 +2009,7 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
   }
 
   const bool has_llm_candidates =
-      m_llm_prediction_mode && !_SnapshotLLMCandidates().candidates.empty();
+      _HasLLMDisplayCandidates(_SnapshotLLMCandidates());
   RIME_STRUCT(RimeContext, ctx);
   if (rime_api->get_context(session_id, &ctx)) {
     if (is_composing) {
@@ -2380,7 +2609,7 @@ void RimeWithWeaselHandler::_GetStatus(Status& stat,
                                        WeaselSessionId ipc_id,
                                        Context& ctx) {
   const bool has_llm_candidates =
-      m_llm_prediction_mode && !_SnapshotLLMCandidates().candidates.empty();
+      _HasLLMDisplayCandidates(_SnapshotLLMCandidates());
   SessionStatus& session_status = get_session_status(ipc_id);
   RimeSessionId session_id = session_status.session_id;
   RIME_STRUCT(RimeStatus, status);
@@ -2392,15 +2621,16 @@ void RimeWithWeaselHandler::_GetStatus(Status& stat,
     stat.schema_id = u8tow(status.schema_id);
     stat.ascii_mode = !!status.is_ascii_mode;
     stat.composing = !!status.is_composing;
-    
+
     // 如果处于LLM预测模式，强制设置composing为true以显示候选栏
     if (has_llm_candidates) {
       stat.composing = true;
       if (m_dev_console && m_dev_console->IsEnabled()) {
-        m_dev_console->WriteLine(L"[_GetStatus] LLM预测模式激活，强制设置 composing=true");
+        m_dev_console->WriteLine(
+            L"[_GetStatus] LLM预测模式激活，强制设置 composing=true");
       }
     }
-    
+
     stat.disabled = !!status.is_disabled;
     stat.full_shape = !!status.is_full_shape;
     if (schema_id != m_last_schema_id) {
@@ -2431,7 +2661,7 @@ void RimeWithWeaselHandler::_GetStatus(Status& stat,
 void RimeWithWeaselHandler::_GetContext(Context& weasel_context,
                                         RimeSessionId session_id) {
   const bool has_llm_candidates =
-      m_llm_prediction_mode && !_SnapshotLLMCandidates().candidates.empty();
+      _HasLLMDisplayCandidates(_SnapshotLLMCandidates());
   RIME_STRUCT(RimeContext, ctx);
   if (rime_api->get_context(session_id, &ctx)) {
     if (ctx.composition.length > 0) {
@@ -2447,15 +2677,15 @@ void RimeWithWeaselHandler::_GetContext(Context& weasel_context,
         weasel_context.preedit.attributes.push_back(attr);
       }
     }
-    
+
     // 获取候选词信息（包括Rime和LLM候选词）
-      CandidateInfo& cinfo(weasel_context.cinfo);
+    CandidateInfo& cinfo(weasel_context.cinfo);
     if (ctx.menu.num_candidates > 0) {
       // 有Rime候选词，调用_GetCandidateInfo会同时添加Rime和LLM候选词
       _GetCandidateInfo(cinfo, ctx);
       if (m_dev_console && m_dev_console->IsEnabled()) {
         std::wstringstream ss;
-        ss << L"[DEBUG] _GetContext: 有Rime候选词(" << ctx.menu.num_candidates 
+        ss << L"[DEBUG] _GetContext: 有Rime候选词(" << ctx.menu.num_candidates
            << L"个)，添加后总候选词数=" << cinfo.candies.size();
         m_dev_console->WriteLine(ss.str());
       }
@@ -2465,7 +2695,8 @@ void RimeWithWeaselHandler::_GetContext(Context& weasel_context,
       _GetCandidateInfo(cinfo, ctx);  // 这会添加LLM候选词
       if (m_dev_console && m_dev_console->IsEnabled()) {
         std::wstringstream ss;
-        ss << L"[DEBUG] _GetContext: 无Rime候选词，添加LLM候选词后 cinfo.candies.size()=" 
+        ss << L"[DEBUG] _GetContext: 无Rime候选词，添加LLM候选词后 "
+              L"cinfo.candies.size()="
            << cinfo.candies.size();
         m_dev_console->WriteLine(ss.str());
       }
@@ -2473,7 +2704,7 @@ void RimeWithWeaselHandler::_GetContext(Context& weasel_context,
       // 既没有Rime候选词，也没有LLM候选词，清空候选词信息
       cinfo.clear();
     }
-    
+
     rime_api->free_context(&ctx);
   } else if (has_llm_candidates) {
     // 如果没有Rime上下文但处于LLM预测模式，创建空的候选词信息并添加LLM候选词
@@ -2483,7 +2714,8 @@ void RimeWithWeaselHandler::_GetContext(Context& weasel_context,
     _GetCandidateInfo(cinfo, empty_ctx);  // 这会添加LLM候选词
     if (m_dev_console && m_dev_console->IsEnabled()) {
       std::wstringstream ss;
-      ss << L"[DEBUG] _GetContext: 无Rime上下文，添加LLM候选词后 cinfo.candies.size()=" 
+      ss << L"[DEBUG] _GetContext: 无Rime上下文，添加LLM候选词后 "
+            L"cinfo.candies.size()="
          << cinfo.candies.size();
       m_dev_console->WriteLine(ss.str());
     }
@@ -2514,12 +2746,64 @@ void RimeWithWeaselHandler::SetContextHistory(ContextHistory* context_history) {
   m_context_history = context_history;
 }
 
+void RimeWithWeaselHandler::_ClearContextHistory(const std::wstring& reason) {
+  if (!m_context_history) {
+    return;
+  }
+
+  if (m_dev_console && m_dev_console->IsEnabled()) {
+    size_t size_before = m_context_history->GetSize();
+    std::wstringstream ss;
+    ss << L"[LLM] 清空上下文历史，原因: " << reason << L"（清空前记录数: "
+       << size_before << L"）";
+    m_dev_console->WriteLine(ss.str());
+  }
+  m_context_history->Clear(m_dev_console);
+}
+
+void RimeWithWeaselHandler::_NoteUserActivity() {
+  ++m_llm_user_activity_seq;
+}
+
+void RimeWithWeaselHandler::_ArmNoInputPredictionAutoHide(
+    WeaselSessionId ipc_id) {
+  const uint64_t hide_seq = ++m_llm_no_input_hide_seq;
+  const uint64_t activity_seq = m_llm_user_activity_seq.load();
+
+  std::thread([this, ipc_id, hide_seq, activity_seq]() {
+    ::Sleep(LLM_NO_INPUT_AUTO_HIDE_MS);
+
+    if (hide_seq != m_llm_no_input_hide_seq.load() ||
+        activity_seq != m_llm_user_activity_seq.load()) {
+      return;
+    }
+
+    bool should_hide = false;
+    {
+      std::lock_guard<std::mutex> lock(m_llm_mutex);
+      should_hide = m_llm_prediction_mode &&
+                    m_current_llm_candidates_from_no_input &&
+                    !m_current_llm_candidates.empty();
+    }
+
+    if (!should_hide) {
+      return;
+    }
+
+    if (m_dev_console && m_dev_console->IsEnabled()) {
+      m_dev_console->WriteLine(
+          L"[LLM] 无输入预测超过 10 秒无操作，自动隐藏候选栏");
+    }
+    _ExitLLMPredictionMode(ipc_id);
+  }).detach();
+}
+
 void RimeWithWeaselHandler::SetDevConsole(DevConsole* dev_console) {
   m_dev_console = dev_console;
   // 设置全局开发终端实例供LLMProvider使用
   extern DevConsole* g_dev_console;
   g_dev_console = dev_console;
-  
+
   // 输出LLM提供者状态
   if (m_dev_console && m_dev_console->IsEnabled()) {
     if (!m_llm_provider) {
@@ -2531,13 +2815,24 @@ void RimeWithWeaselHandler::SetDevConsole(DevConsole* dev_console) {
       m_dev_console->WriteLine(L"[LLM]       api_key: \"your-api-key\"");
     } else if (!m_llm_provider->IsAvailable()) {
       m_dev_console->WriteLine(L"[LLM] LLM提供者已初始化，但不可用");
-      m_dev_console->WriteLine(L"[LLM] 请检查配置：llm/enabled 和 llm/openai/api_key");
+      m_dev_console->WriteLine(
+          L"[LLM] 请检查配置：llm/enabled 和 llm/openai/api_key");
     } else {
       std::wstring provider_name = u8tow(m_llm_provider->GetProviderName());
       m_dev_console->WriteLine(L"[LLM] LLM提供者已就绪: " + provider_name);
     }
+    if (m_pinyin_rerank_provider && m_pinyin_rerank_provider->IsAvailable()) {
+      m_dev_console->WriteLine(
+          L"[LLM] 有拼音实时重排器已就绪: " +
+          u8tow(m_pinyin_rerank_provider->GetProviderName()));
+    } else {
+      m_dev_console->WriteLine(L"[LLM] 有拼音实时重排器未启用或不可用");
+    }
     m_dev_console->WriteLine(std::wstring(L"[LLM] 开发者模式词源标注: ") +
                              (m_llm_developer_mode ? L"开启" : L"关闭"));
+    m_dev_console->WriteLine(
+        std::wstring(L"[LLM] 有拼音 AI 重排: ") +
+        (m_llm_enable_pinyin_constraint ? L"开启" : L"关闭"));
   }
 }
 
@@ -2546,24 +2841,38 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
     LLMRequestType request_type,
     const std::wstring& current_input,
     bool require_rime_candidates,
-    DWORD debounce_ms) {
-  if (!m_llm_provider || !m_llm_provider->IsAvailable()) {
-    LOG(WARNING) << "[LLM] LLM provider is not available or not initialized";
+    DWORD debounce_ms,
+    uint64_t ui_update_not_before) {
+  const bool is_no_input_request =
+      request_type == LLMRequestType::NoInputPrediction;
+  LLMProvider* active_provider = is_no_input_request
+                                     ? m_llm_provider.get()
+                                     : m_pinyin_rerank_provider.get();
+  if (!active_provider || !active_provider->IsAvailable()) {
+    LOG(WARNING) << "[LLM] Provider is not available or not initialized, "
+                 << "request_type=" << GetLLMRequestTypeName(request_type);
     if (m_dev_console && m_dev_console->IsEnabled()) {
-      m_dev_console->WriteLine(L"[LLM] LLM提供者不可用，无法进行预测");
+      m_dev_console->WriteLine(L"[LLM] 当前请求所需的提供者不可用，无法继续");
     }
     return;
   }
 
-  LOG(INFO) << "[LLM] Starting LLM prediction, ipc_id=" << ipc_id;
+  LOG(INFO) << "[LLM] Starting prediction, ipc_id=" << ipc_id
+            << ", provider=" << active_provider->GetProviderName();
+
+  const size_t kDisplayCandidateBudget = 5;
+  const size_t kInputSupplementCandidateCap = 3;
+  const size_t kRimeRerankPoolLimit = 8;
 
   // 从上下文历史获取最近 50 词作为 LLM 上下文
   std::wstring context;
   if (m_context_history) {
-    if (request_type == LLMRequestType::NoInputPrediction) {
+    if (request_type == LLMRequestType::NoInputPrediction &&
+        current_input.empty()) {
       const size_t raw_context_chars =
           m_llm_context_max_chars > 0 ? m_llm_context_max_chars : 96;
-      context = m_context_history->GetRecentTextContext(raw_context_chars, true);
+      context =
+          m_context_history->GetRecentTextContext(raw_context_chars, true);
     } else {
       context = m_context_history->GetRecentContext(m_llm_context_recent_words);
       context = _TrimPredictionContext(context);
@@ -2571,11 +2880,11 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
     LOG(INFO) << "[LLM] Context from history, length=" << context.length();
   }
 
-  LLMRequest request;
-  request.type = request_type;
-  request.context = context;
-  request.current_input = current_input;
-  request.max_candidates = 5;
+  LLMRequest prediction_request;
+  prediction_request.type = request_type;
+  prediction_request.context = context;
+  prediction_request.current_input = current_input;
+  prediction_request.max_candidates = 0;
 
   if (!current_input.empty()) {
     const RimeSessionId session_id = to_session_id(ipc_id);
@@ -2583,10 +2892,10 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
     if (rime_api->get_context(session_id, &reorder_ctx)) {
       const size_t rime_candidate_count =
           static_cast<size_t>(reorder_ctx.menu.num_candidates);
-      request.rime_candidates.reserve(rime_candidate_count);
+      prediction_request.rime_candidates.reserve(rime_candidate_count);
       for (size_t i = 0; i < rime_candidate_count; ++i) {
         if (reorder_ctx.menu.candidates[i].text) {
-          request.rime_candidates.push_back(
+          prediction_request.rime_candidates.push_back(
               u8tow(reorder_ctx.menu.candidates[i].text));
         }
       }
@@ -2594,14 +2903,23 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
     }
   }
 
+  const bool has_current_input = !prediction_request.current_input.empty();
+  const bool has_rime_candidates = !prediction_request.rime_candidates.empty();
   const bool enable_rime_reorder =
-      !request.current_input.empty() && !request.rime_candidates.empty();
+      !is_no_input_request && has_current_input && has_rime_candidates;
+  size_t supplemental_prediction_budget = 0;
+  if (is_no_input_request) {
+    supplemental_prediction_budget = kDisplayCandidateBudget;
+  }
+  prediction_request.max_candidates = supplemental_prediction_budget;
 
   // 如果上下文仍然为空，记录警告但尝试继续预测
   if (context.empty()) {
-    LOG(WARNING) << "[LLM] Context is empty, attempting prediction with empty context";
+    LOG(WARNING)
+        << "[LLM] Context is empty, attempting prediction with empty context";
     if (m_dev_console && m_dev_console->IsEnabled()) {
-      m_dev_console->WriteLine(L"[LLM] 警告：上下文为空，将使用空上下文进行预测");
+      m_dev_console->WriteLine(
+          L"[LLM] 警告：上下文为空，将使用空上下文进行预测");
     }
     // 不返回，继续尝试预测以支持冷启动
   }
@@ -2609,9 +2927,11 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
   if (m_dev_console && m_dev_console->IsEnabled()) {
     m_dev_console->WriteLine(L"[LLM] ========== 开始LLM预测 ==========");
     m_dev_console->WriteLine(
-        L"[LLM] 请求类型: " + std::wstring(GetLLMRequestTypeName(request.type)));
+        L"[LLM] 请求类型: " +
+        std::wstring(GetLLMRequestTypeName(prediction_request.type)));
     if (!context.empty()) {
-      m_dev_console->WriteLine(L"[LLM] 上下文长度: " + std::to_wstring(context.length()));
+      m_dev_console->WriteLine(L"[LLM] 上下文长度: " +
+                               std::to_wstring(context.length()));
       m_dev_console->WriteLine(L"[LLM] 上下文内容: " + context);
     } else {
       m_dev_console->WriteLine(L"[LLM] 使用空上下文进行预测");
@@ -2619,74 +2939,229 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
     if (!current_input.empty()) {
       m_dev_console->WriteLine(L"[LLM] 当前输入（拼音）: " + current_input);
     }
-    if (!request.rime_candidates.empty()) {
+    if (!prediction_request.rime_candidates.empty()) {
       m_dev_console->WriteLine(
-          L"[LLM] Rime 候选数: " + std::to_wstring(request.rime_candidates.size()));
+          L"[LLM] Rime 候选数: " +
+          std::to_wstring(prediction_request.rime_candidates.size()));
+    }
+    if (enable_rime_reorder) {
+      m_dev_console->WriteLine(
+          L"[LLM] 有输入时使用 Alpha 实时重排；不再补充 LLM 长句候选");
+      m_dev_console->WriteLine(L"[LLM] 重排池上限: " +
+                               std::to_wstring(kRimeRerankPoolLimit));
+    }
+    if (prediction_request.max_candidates > 0) {
+      m_dev_console->WriteLine(
+          L"[LLM] 本次预测补全预算: " +
+          std::to_wstring(prediction_request.max_candidates));
+    } else if (enable_rime_reorder) {
+      m_dev_console->WriteLine(
+          L"[LLM] Rime 候选已足够，跳过额外 LLM 补全，仅执行重排");
     }
   }
 
   LOG(INFO) << "[LLM] Context length: " << context.length();
   LOG(INFO) << "[LLM] Current input: " << wtou8(current_input);
-  LOG(INFO) << "[LLM] Scheduling async unified LLM request";
+  LOG(INFO) << "[LLM] Preparing unified LLM request";
+
+  if (request_type != LLMRequestType::NoInputPrediction) {
+    ++m_llm_no_input_hide_seq;
+  }
 
   m_has_display_highlight_override = false;
   // 生成新的请求序号，用于标记“最新一次”预测请求
   const uint64_t request_seq = ++m_llm_request_seq;
 
   // 拷贝必要参数到后台线程
-  LLMRequest request_copy = request;
+  LLMRequest request_copy = prediction_request;
 
-  std::thread([this, ipc_id, request_seq, request_copy, require_rime_candidates,
-               enable_rime_reorder, debounce_ms]() {
-    if (debounce_ms > 0) {
-      ::Sleep(debounce_ms);
-      if (request_seq != m_llm_request_seq.load()) {
-        LOG(INFO) << "[LLM] Debounced request became stale before execution, seq="
-                  << request_seq;
-        return;
+  auto execute_request = [this, ipc_id, request_seq, request_copy,
+                          require_rime_candidates, enable_rime_reorder,
+                          ui_update_not_before, kRimeRerankPoolLimit,
+                          active_provider, is_no_input_request]() {
+    std::vector<std::wstring> rerank_candidates;
+    uint64_t rerank_ui_not_before = 0;
+    if (enable_rime_reorder) {
+      const size_t rerank_pool_size =
+          (std::min)(request_copy.rime_candidates.size(), kRimeRerankPoolLimit);
+      if (rerank_pool_size > 0) {
+        LLMRequest rerank_request;
+        rerank_request.type = LLMRequestType::RimeReorder;
+        rerank_request.context = request_copy.context;
+        rerank_request.current_input = request_copy.current_input;
+        rerank_request.rime_candidates.assign(
+            request_copy.rime_candidates.begin(),
+            request_copy.rime_candidates.begin() + rerank_pool_size);
+        rerank_request.max_candidates = rerank_request.rime_candidates.size();
+
+        if (m_dev_console && m_dev_console->IsEnabled()) {
+          std::wstringstream ss;
+          ss << L"[LLM] 先执行有输入重排，候选池="
+             << rerank_request.rime_candidates.size() << L"（原始 Rime="
+             << request_copy.rime_candidates.size() << L"）";
+          m_dev_console->WriteLine(ss.str());
+
+          std::wstring raw_order;
+          for (size_t i = 0; i < rerank_request.rime_candidates.size(); ++i) {
+            if (i > 0) {
+              raw_order += L" | ";
+            }
+            raw_order += rerank_request.rime_candidates[i];
+          }
+          m_dev_console->WriteLine(L"[LLM] Rime 原始候选顺序: " + raw_order);
+        }
+
+        rerank_candidates = active_provider->ExecuteRequest(rerank_request);
+        const std::vector<size_t> rerank_indices =
+            active_provider->GetLastRerankIndices();
+        if (request_seq != m_llm_request_seq.load()) {
+          LOG(INFO) << "[LLM] Discarding stale rerank result, seq="
+                    << request_seq
+                    << ", latest_seq=" << m_llm_request_seq.load();
+          return;
+        }
+
+        rerank_ui_not_before =
+            !rerank_candidates.empty() ? ui_update_not_before : 0;
+
+        {
+          std::lock_guard<std::mutex> lock(m_llm_mutex);
+          m_current_llm_candidates.clear();
+          m_current_llm_rerank_candidates = rerank_candidates;
+          m_current_llm_rerank_indices = rerank_indices;
+          m_current_llm_rerank_ui_update_not_before = rerank_ui_not_before;
+          m_current_llm_candidates_require_rime = require_rime_candidates;
+          m_current_llm_candidates_enable_rime_reorder =
+              !m_current_llm_rerank_candidates.empty();
+          m_current_llm_candidates_prefer_primary = false;
+          m_current_llm_candidates_from_no_input = false;
+        }
+
+        if (m_dev_console && m_dev_console->IsEnabled()) {
+          std::wstringstream ss;
+          ss << L"[LLM] 有输入重排完成，获得 " << rerank_candidates.size()
+             << L" 个排序候选";
+          m_dev_console->WriteLine(ss.str());
+
+          if (!rerank_candidates.empty()) {
+            std::wstring rerank_order;
+            for (size_t i = 0; i < rerank_candidates.size(); ++i) {
+              if (i > 0) {
+                rerank_order += L" | ";
+              }
+              rerank_order += rerank_candidates[i];
+            }
+            m_dev_console->WriteLine(L"[LLM] Alpha 重排后顺序: " +
+                                     rerank_order);
+
+            if (!rerank_indices.empty()) {
+              std::wstring index_order;
+              for (size_t i = 0; i < rerank_indices.size(); ++i) {
+                if (i > 0) {
+                  index_order += L" | ";
+                }
+                index_order += std::to_wstring(rerank_indices[i]);
+              }
+              m_dev_console->WriteLine(L"[LLM] Alpha 重排后索引: " +
+                                       index_order);
+            }
+
+            bool same_order = rerank_candidates.size() ==
+                              rerank_request.rime_candidates.size();
+            if (same_order) {
+              for (size_t i = 0; i < rerank_candidates.size(); ++i) {
+                if (rerank_candidates[i] != rerank_request.rime_candidates[i]) {
+                  same_order = false;
+                  break;
+                }
+              }
+            }
+            if (same_order) {
+              m_dev_console->WriteLine(
+                  L"[LLM] 重排结果与原始顺序相同（此 case 下 Alpha "
+                  L"未改变排序）");
+            }
+          }
+        }
+
+        _UpdateUI(ipc_id);
       }
     }
-    // 后台线程中执行统一请求，不阻塞用户输入线程
-    LOG(INFO) << "[LLM] Async thread executing unified LLM request, seq="
-              << request_seq;
+
+    if (request_copy.max_candidates == 0) {
+      LOG(INFO) << "[LLM] Skip supplemental prediction, seq=" << request_seq
+                << ", rerank_count=" << rerank_candidates.size();
+      if (m_dev_console && m_dev_console->IsEnabled()) {
+        m_dev_console->WriteLine(L"[LLM] 本次仅执行重排，不再额外生成补全候选");
+        m_dev_console->WriteLine(L"[LLM] ========== 预测结束 ==========");
+      }
+
+      if (rerank_ui_not_before > 0 && GetTickCount64() < rerank_ui_not_before) {
+        const DWORD sleep_ms =
+            static_cast<DWORD>(rerank_ui_not_before - GetTickCount64());
+        ::Sleep(sleep_ms);
+        if (request_seq != m_llm_request_seq.load()) {
+          LOG(INFO) << "[LLM] Delayed rerank UI update canceled, seq="
+                    << request_seq;
+          return;
+        }
+        _UpdateUI(ipc_id);
+      }
+      return;
+    }
+
     const ULONGLONG generation_start = GetTickCount64();
     std::atomic<bool> first_candidate_seen{false};
     bool prefer_llm_primary = false;
-    auto candidates = m_llm_provider->ExecuteRequest(
+    auto candidates = active_provider->ExecuteRequest(
         request_copy,
-        [this, ipc_id, request_seq, require_rime_candidates,
-         &first_candidate_seen, &generation_start, &prefer_llm_primary](
-            const std::vector<std::wstring>& partial_candidates) {
-          if (request_seq != m_llm_request_seq.load()) {
-            return false;
-          }
+        is_no_input_request
+            ? LLMPartialCallback(
+                  [this, ipc_id, request_seq, require_rime_candidates,
+                   &first_candidate_seen, &generation_start,
+                   &prefer_llm_primary](
+                      const std::vector<std::wstring>& partial_candidates) {
+                    if (request_seq != m_llm_request_seq.load()) {
+                      return false;
+                    }
 
-          if (!partial_candidates.empty() &&
-              !first_candidate_seen.exchange(true)) {
-            prefer_llm_primary =
-                (GetTickCount64() - generation_start) <= 100;
-          }
+                    if (!partial_candidates.empty() &&
+                        !first_candidate_seen.exchange(true)) {
+                      prefer_llm_primary =
+                          (GetTickCount64() - generation_start) <= 100;
+                    }
 
-          {
-            std::lock_guard<std::mutex> lock(m_llm_mutex);
-            m_current_llm_candidates = partial_candidates;
-            m_current_llm_rerank_candidates.clear();
-            m_current_llm_candidates_require_rime = require_rime_candidates;
-            m_current_llm_candidates_enable_rime_reorder = false;
-            m_current_llm_candidates_prefer_primary = prefer_llm_primary;
-          }
+                    {
+                      std::lock_guard<std::mutex> lock(m_llm_mutex);
+                      m_current_llm_candidates = partial_candidates;
+                      m_current_llm_rerank_candidates.clear();
+                      m_current_llm_rerank_indices.clear();
+                      m_current_llm_rerank_ui_update_not_before = 0;
+                      m_current_llm_candidates_require_rime =
+                          require_rime_candidates;
+                      m_current_llm_candidates_enable_rime_reorder = false;
+                      m_current_llm_candidates_prefer_primary =
+                          prefer_llm_primary;
+                      m_current_llm_candidates_from_no_input =
+                          !partial_candidates.empty();
+                    }
 
-          if (m_dev_console && m_dev_console->IsEnabled()) {
-            std::wstringstream ss;
-            ss << L"[LLM] 增量解码更新，当前获得 "
-               << partial_candidates.size() << L" 个候选词"
-               << (prefer_llm_primary ? L"（LLM 主候选）" : L"（传统候选优先）");
-            m_dev_console->WriteLine(ss.str());
-          }
+                    if (m_dev_console && m_dev_console->IsEnabled()) {
+                      std::wstringstream ss;
+                      ss << L"[LLM] 增量解码更新，当前获得 "
+                         << partial_candidates.size() << L" 个候选词"
+                         << (prefer_llm_primary ? L"（LLM 主候选）"
+                                                : L"（传统候选优先）");
+                      m_dev_console->WriteLine(ss.str());
+                    }
 
-          _UpdateUI(ipc_id);
-          return true;
-        });
+                    _UpdateUI(ipc_id);
+                    if (!partial_candidates.empty()) {
+                      _ArmNoInputPredictionAutoHide(ipc_id);
+                    }
+                    return true;
+                  })
+            : LLMPartialCallback());
 
     // 如果有更新的请求已经发起，则丢弃本次结果
     if (request_seq != m_llm_request_seq.load()) {
@@ -2695,68 +3170,123 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
       return;
     }
 
-    std::vector<std::wstring> rerank_candidates;
-    if (request_copy.type == LLMRequestType::PinyinConstrainedPrediction &&
-        !request_copy.rime_candidates.empty() && enable_rime_reorder) {
-      LLMRequest rerank_request;
-      rerank_request.type = LLMRequestType::RimeReorder;
-      rerank_request.context = request_copy.context;
-      rerank_request.current_input = request_copy.current_input;
-      rerank_request.rime_candidates = request_copy.rime_candidates;
-      rerank_request.max_candidates = request_copy.max_candidates;
-      rerank_candidates = m_llm_provider->ExecuteRequest(rerank_request);
+    if (!candidates.empty() && !first_candidate_seen.load()) {
+      prefer_llm_primary = (GetTickCount64() - generation_start) <= 100;
     }
 
     // 将结果写入共享状态
     size_t candidate_count = 0;
+    size_t rerank_count = 0;
     {
       std::lock_guard<std::mutex> lock(m_llm_mutex);
       m_current_llm_candidates = std::move(candidates);
       m_current_llm_rerank_candidates = std::move(rerank_candidates);
+      if (!m_current_llm_candidates_enable_rime_reorder) {
+        m_current_llm_rerank_indices.clear();
+      }
+      m_current_llm_rerank_ui_update_not_before = rerank_ui_not_before;
       m_current_llm_candidates_require_rime = require_rime_candidates;
       m_current_llm_candidates_enable_rime_reorder =
           !m_current_llm_rerank_candidates.empty();
-      m_current_llm_candidates_prefer_primary = prefer_llm_primary;
+      m_current_llm_candidates_prefer_primary =
+          m_current_llm_candidates_enable_rime_reorder ? false
+                                                       : prefer_llm_primary;
+      m_current_llm_candidates_from_no_input =
+          request_copy.type == LLMRequestType::NoInputPrediction &&
+          !m_current_llm_candidates.empty() &&
+          m_current_llm_rerank_candidates.empty();
       candidate_count = m_current_llm_candidates.size();
+      rerank_count = m_current_llm_rerank_candidates.size();
     }
 
-    LOG(INFO) << "[LLM] Async LLMProvider returned " << candidate_count << " candidates, seq=" << request_seq;
+    LOG(INFO) << "[LLM] Async LLMProvider returned " << candidate_count
+              << " supplemental candidates, rerank_count=" << rerank_count
+              << ", seq=" << request_seq;
 
     if (m_dev_console && m_dev_console->IsEnabled()) {
       std::wstringstream ss;
-      ss << L"[LLM] 异步预测完成，获得 " << candidate_count << L" 个候选词";
+      ss << L"[LLM] 异步预测完成，补全候选=" << candidate_count
+         << L"，重排候选=" << rerank_count;
       m_dev_console->WriteLine(ss.str());
       m_dev_console->WriteLine(L"[LLM] ========== 预测结束 ==========");
     }
 
     // 更新UI显示LLM候选词
     _UpdateUI(ipc_id);
+    if (request_copy.type == LLMRequestType::NoInputPrediction &&
+        candidate_count > 0 && rerank_count == 0) {
+      _ArmNoInputPredictionAutoHide(ipc_id);
+    }
+
+    if (rerank_ui_not_before > 0 && GetTickCount64() < rerank_ui_not_before) {
+      const DWORD sleep_ms =
+          static_cast<DWORD>(rerank_ui_not_before - GetTickCount64());
+      ::Sleep(sleep_ms);
+      if (request_seq != m_llm_request_seq.load()) {
+        LOG(INFO) << "[LLM] Delayed rerank UI update canceled, seq="
+                  << request_seq;
+        return;
+      }
+      _UpdateUI(ipc_id);
+    }
+  };
+
+  if (!is_no_input_request && debounce_ms == 0) {
+    LOG(INFO) << "[LLM] Executing synchronous rerank request, seq="
+              << request_seq;
+    execute_request();
+    return;
+  }
+
+  std::thread([this, request_seq, debounce_ms,
+               execute_request = std::move(execute_request)]() mutable {
+    if (debounce_ms > 0) {
+      ::Sleep(debounce_ms);
+      if (request_seq != m_llm_request_seq.load()) {
+        LOG(INFO)
+            << "[LLM] Debounced request became stale before execution, seq="
+            << request_seq;
+        return;
+      }
+    }
+    LOG(INFO) << "[LLM] Async thread executing unified LLM request, seq="
+              << request_seq;
+    execute_request();
   }).detach();
 }
 
-void RimeWithWeaselHandler::_ExitLLMPredictionMode(WeaselSessionId ipc_id) {
+void RimeWithWeaselHandler::_ExitLLMPredictionMode(
+    WeaselSessionId ipc_id,
+    bool refresh_ui_immediately) {
   ++m_llm_request_seq;
+  ++m_llm_no_input_hide_seq;
   m_llm_prediction_mode = false;
   {
     std::lock_guard<std::mutex> lock(m_llm_mutex);
     m_current_llm_candidates.clear();
     m_current_llm_rerank_candidates.clear();
+    m_current_llm_rerank_ui_update_not_before = 0;
     m_current_llm_candidates_require_rime = false;
     m_current_llm_candidates_enable_rime_reorder = false;
     m_current_llm_candidates_prefer_primary = false;
+    m_current_llm_candidates_from_no_input = false;
   }
   m_has_display_highlight_override = false;
-  
-  // 强制隐藏候选栏
-  if (m_ui) {
-    m_ui->Hide();
-    if (m_dev_console && m_dev_console->IsEnabled()) {
-      m_dev_console->WriteLine(L"[LLM] 强制隐藏候选栏");
+
+  if (refresh_ui_immediately) {
+    // 强制隐藏候选栏
+    if (m_ui) {
+      m_ui->Hide();
+      if (m_dev_console && m_dev_console->IsEnabled()) {
+        m_dev_console->WriteLine(L"[LLM] 强制隐藏候选栏");
+      }
     }
+    _UpdateUI(ipc_id);
+  } else if (m_dev_console && m_dev_console->IsEnabled()) {
+    m_dev_console->WriteLine(
+        L"[LLM] 已退出LLM预测模式，延后到当前按键处理结束后刷新UI");
   }
-  
-  _UpdateUI(ipc_id);
-  
+
   if (m_dev_console && m_dev_console->IsEnabled()) {
     m_dev_console->WriteLine(L"[LLM] 退出LLM预测模式");
   }

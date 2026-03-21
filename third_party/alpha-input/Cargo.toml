@@ -1,0 +1,28 @@
+[package]
+name = "alpha-input"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bytemuck = "1.23.2"
+config = "0.15.14"
+half = "2.6.0"
+io = "0.0.2"
+lmdb-zero = "0.4.4"
+log = "0.4.27"
+ndarray = "0.15.1"
+num-traits = "0.2.19"
+onnxruntime = "0.0.14"
+ort = { git = "https://github.com/pykeio/ort", tag = "v1.16.3" }
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2.0.14"
+tokenizers = "0.21.4"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+
+[features]
+cuda = ["ort/cuda"]

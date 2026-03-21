@@ -43,6 +43,10 @@ class ContextHistory {
   // dev_console: 开发终端实例，用于输出日志（可为nullptr）
   void Clear(DevConsole* dev_console = nullptr);
 
+  // 从最近上下文尾部移除指定字符数，用于同步退格后的已提交文本
+  void RemoveRecentText(size_t char_count,
+                        DevConsole* dev_console = nullptr);
+
   // 获取当前记录数量
   size_t GetSize() const;
 
@@ -78,6 +82,9 @@ class ContextHistory {
   // 用压缩后的词序列替换最旧的 100 个词
   void ReplaceOldestWithCompressed(const std::vector<std::wstring>& compressed,
                                    DevConsole* dev_console);
+
+  // 根据当前 text_history 重建词级历史（要求已持有锁）
+  void RebuildWordHistoryLocked();
 
   mutable std::mutex m_mutex;  // 线程安全锁
   std::vector<std::wstring> m_history;  // 历史记录（线性：最旧在 0，最新在 back）

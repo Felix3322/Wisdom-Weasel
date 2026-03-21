@@ -16,9 +16,10 @@ enum class LLMRequestType : uint8_t {
 
 struct LLMRequest {
   LLMRequestType type = LLMRequestType::NoInputPrediction;
-  std::wstring context;          // 最近上下文
-  std::wstring current_input;    // 当前拼音/输入串
-  std::vector<std::wstring> rime_candidates;  // Rime 原始候选，仅 Rime 重排使用
+  std::wstring context;        // 最近上下文
+  std::wstring current_input;  // 当前拼音/输入串
+  std::vector<std::wstring>
+      rime_candidates;  // 候选池；重排时可包含 Rime+LLM 去重结果
   size_t max_candidates = 5;
 };
 
@@ -40,8 +41,7 @@ std::wstring JoinCandidatesForPrompt(
 InstructPrompt BuildInstructPrompt(const LLMRequest& request);
 std::wstring BuildCompactPrompt(const LLMRequest& request);
 std::wstring BuildBaseCompletionPrompt(const LLMRequest& request);
-std::vector<std::string> BuildPinyinConstraintParts(
-    const LLMRequest& request);
+std::vector<std::string> BuildPinyinConstraintParts(const LLMRequest& request);
 
 }  // namespace llm_request
 
@@ -63,6 +63,9 @@ class LLMProvider {
 
   // 获取提供者名称
   virtual std::string GetProviderName() const = 0;
+
+  // 最近一次重排请求返回的原始候选索引顺序；默认空
+  virtual std::vector<size_t> GetLastRerankIndices() const { return {}; }
 };
 
 // OpenAI兼容接口提供者
@@ -134,7 +137,9 @@ class LlamaCppProvider : public LLMProvider {
       const std::string& system_prompt_utf8,
       const std::string& user_prompt_utf8,
       size_t n_parallel,
-      int max_new_tokens);
+      int max_new_tokens,
+      const std::function<bool(const std::vector<std::string>&)>& on_partial =
+          nullptr);
   // 预处理并缓存 system prompt 的 KV 状态
   bool PrepareSystemPrompt(const std::string& system_prompt_utf8);
 
@@ -145,8 +150,8 @@ class LlamaCppProvider : public LLMProvider {
   int m_max_tokens;          // 最大生成token数
   double m_temperature;      // 温度参数
   int m_n_threads;           // 线程数
-  bool m_instruct_model;  // true=Instruct 使用指令 prompt，false=Base 仅用
-                          // context 补全
+  bool m_instruct_model;     // true=Instruct 使用指令 prompt，false=Base 仅用
+                             // context 补全
 
   // llama.cpp 对象（使用前向声明避免包含头文件）
   void* m_model;    // llama_model*
@@ -187,4 +192,37 @@ class HFConstraintProvider : public LLMProvider {
   void* m_hSession;       // HINTERNET，复用的 WinHTTP 会话
   void* m_hConnect;       // HINTERNET，复用的连接
   std::string m_cached_url;  // 当前连接对应的 URL，变化时重建连接
+};
+
+// Alpha 风格实时重排提供者（HTTP）
+// 请求会转换为
+// {"context":"...","current_input":"...","candidates":[...],"top_k":N}
+class AlphaRerankProvider : public LLMProvider {
+ public:
+  AlphaRerankProvider();
+  ~AlphaRerankProvider() override;
+  bool LoadConfig(const std::string& config_name) override;
+  std::vector<std::wstring> ExecuteRequest(
+      const LLMRequest& request,
+      const LLMPartialCallback& on_partial = nullptr) override;
+  bool IsAvailable() const override;
+  std::string GetProviderName() const override { return "Alpha HTTP Rerank"; }
+  std::vector<size_t> GetLastRerankIndices() const override {
+    return m_last_rerank_indices;
+  }
+
+ private:
+  bool ExecuteHttpRequest(const std::string& url,
+                          const std::string& request_body,
+                          std::string& response_body);
+  std::vector<std::wstring> ParseResponse(const std::string& json_response);
+  void CloseConnection();
+
+  bool m_enabled;
+  std::string m_api_url;
+  int m_timeout_ms;
+  void* m_hSession;
+  void* m_hConnect;
+  std::string m_cached_url;
+  std::vector<size_t> m_last_rerank_indices;
 };

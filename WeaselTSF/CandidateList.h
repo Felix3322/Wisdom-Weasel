@@ -76,6 +76,12 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
   // for CCandidateList::Destroy(), when inputing app exit
   void _DisposeUIWindowAll();
   void _MakeUIWindow();
+  void _StartAsyncPoll();
+  void _StopAsyncPoll();
+  static VOID CALLBACK OnAsyncPollTimer(_In_ HWND hwnd,
+                                        _In_ UINT uMsg,
+                                        _In_ UINT_PTR idEvent,
+                                        _In_ DWORD dwTime);
 
   std::unique_ptr<weasel::UI> _ui;
   DWORD _cRef;
@@ -86,6 +92,9 @@ class CCandidateList : public ITfIntegratableCandidateListUIElement,
 
   BOOL _pbShow;
   weasel::UIStyle _style;
+  bool _asyncPolling;
+  HWND _asyncPollHwnd;
+  static const UINT ASYNC_POLL_INTERVAL_MS = 120;
 
   com_ptr<ITfContext> _pContextDocument;
 };

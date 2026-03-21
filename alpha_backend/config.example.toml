@@ -1,0 +1,14 @@
+[model]
+# ONNX 模型文件路径
+path = "C:/models/alpha/model/model.onnx"
+# tokenizer.json 路径
+tokenizer = "C:/models/alpha/model/tokenizer.json"
+max_input_length = 512
+inference_hardware = "cpu"
+optimization_level = 3
+
+[database]
+# 由 export_embeddings_lmdb.py 导出的 LMDB 目录
+path = "C:/models/alpha/embeddings_lmdb"
+map_size_mb = 1024
+read_only = true

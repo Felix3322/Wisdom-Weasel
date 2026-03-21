@@ -1,0 +1,21 @@
+# Model configuration
+[model]
+# Path to the ONNX model file
+path = "./model"
+# Path to the tokenizer JSON file
+tokenizer = "./model/tokenizer.json"
+# Maximum length of input text (in tokens)
+max_input_length = 512
+# Inference hardware: "cpu" or "cuda"
+inference_hardware = "cpu"
+# Model optimization level (0-3)
+optimization_level = 3
+
+# Database configuration
+[database]
+# Path to the LMDB database
+path = "./model/embeddings_lmdb"
+# LMDB map size in MB
+map_size_mb = 1024
+# Whether to open LMDB in read-only mode
+read_only = true

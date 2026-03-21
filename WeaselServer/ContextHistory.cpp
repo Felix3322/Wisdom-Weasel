@@ -198,6 +198,54 @@ void ContextHistory::Clear(DevConsole* dev_console) {
   }
 }
 
+void ContextHistory::RemoveRecentText(size_t char_count,
+                                      DevConsole* dev_console) {
+  if (char_count == 0) {
+    return;
+  }
+
+  size_t removed_chars = 0;
+  size_t current_size = 0;
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    while (char_count > 0 && !m_text_history.empty()) {
+      std::wstring& tail = m_text_history.back();
+      if (tail.empty()) {
+        m_text_history.pop_back();
+        continue;
+      }
+
+      const size_t erase_count = (std::min)(char_count, tail.size());
+      tail.erase(tail.size() - erase_count, erase_count);
+      char_count -= erase_count;
+      removed_chars += erase_count;
+
+      while (!tail.empty() && std::iswspace(tail.back())) {
+        tail.pop_back();
+      }
+      if (tail.empty()) {
+        m_text_history.pop_back();
+      }
+    }
+
+    RebuildWordHistoryLocked();
+    current_size = m_history.size();
+  }
+
+  if (dev_console && dev_console->IsEnabled()) {
+    std::wstringstream ss;
+    ss << L"[上下文更新] 退格同步移除最近上下文 " << removed_chars
+       << L" 个字符 | 当前历史记录数: " << current_size;
+    dev_console->WriteLine(ss.str());
+    if (current_size > 0) {
+      std::wstring recent = GetRecentContext(10);
+      if (!recent.empty()) {
+        dev_console->WriteLine(L"  最近10个词: " + recent);
+      }
+    }
+  }
+}
+
 size_t ContextHistory::GetSize() const {
   std::lock_guard<std::mutex> lock(m_mutex);
   return m_history.size();
@@ -266,6 +314,42 @@ void ContextHistory::ReplaceOldestWithCompressed(
     ss << L"[记忆压缩] 完成，压缩为 " << compressed.size() << L" 个词，当前历史: "
        << m_history.size();
     dev_console->WriteLine(ss.str());
+  }
+}
+
+void ContextHistory::RebuildWordHistoryLocked() {
+  m_history.clear();
+
+  for (const auto& segment : m_text_history) {
+    std::vector<std::wstring> words = DeduplicateWords(SplitIntoWords(segment));
+    for (const auto& word : words) {
+      if (word.empty()) {
+        continue;
+      }
+      if (!m_history.empty() && m_history.back() == word) {
+        continue;
+      }
+      m_history.push_back(word);
+    }
+  }
+
+  if (!m_memory_compressor || !m_memory_compressor->IsAvailable()) {
+    size_t batch = GetCompressWordCount();
+    if (batch == 0) {
+      batch = 1;
+    }
+    while (m_history.size() > m_max_size) {
+      size_t erase_count = (std::min)(batch, m_history.size());
+      m_history.erase(m_history.begin(), m_history.begin() + erase_count);
+    }
+  } else {
+    while (m_history.size() > m_max_size) {
+      m_history.erase(m_history.begin());
+    }
+  }
+
+  while (m_text_history.size() > m_max_size) {
+    m_text_history.erase(m_text_history.begin());
   }
 }
 
