@@ -1,4 +1,8 @@
 # Wisdom-Weasel
+<img width="702" height="111" alt="image" src="https://github.com/user-attachments/assets/009c5e2d-4299-42da-b291-62974635e3a7" />
+<img width="688" height="97" alt="image" src="https://github.com/user-attachments/assets/d77ae687-9844-4a05-b38b-3e82c6093aab" />
+<img width="655" height="87" alt="image" src="https://github.com/user-attachments/assets/f4bc8f3f-1cc3-436f-9e3e-4054fd643ed3" />
+
 
 在小狼毫（Weasel）基础上，整合三层能力：
 
@@ -9,6 +13,7 @@
 ---
 
 ## 当前架构
+<img width="598" height="407" alt="image" src="https://github.com/user-attachments/assets/ca3e2403-ea07-4d1e-9a37-9f5acb7bf77b" />
 
 ### 有拼音输入
 
