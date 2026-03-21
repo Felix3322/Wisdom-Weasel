@@ -4,6 +4,17 @@
 
 using namespace weasel;
 
+namespace {
+
+void ShowPanelOnTop(WeaselPanel& panel) {
+  if (!panel.IsWindow())
+    return;
+  ::SetWindowPos(panel.m_hWnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+}  // namespace
+
 class weasel::UIImpl {
  public:
   WeaselPanel panel;
@@ -19,6 +30,7 @@ class weasel::UIImpl {
       timer = 0;
     }
     panel.Refresh();
+    ShowPanelOnTop(panel);
   }
   void Show();
   void Hide();
@@ -39,7 +51,7 @@ UINT_PTR UIImpl::timer = 0;
 void UIImpl::Show() {
   if (!panel.IsWindow())
     return;
-  panel.ShowWindow(SW_SHOWNA);
+  ShowPanelOnTop(panel);
   shown = true;
   if (timer) {
     KillTimer(panel.m_hWnd, AUTOHIDE_TIMER);
@@ -62,7 +74,7 @@ void UIImpl::ShowWithTimeout(size_t millisec) {
   if (!panel.IsWindow())
     return;
   DLOG(INFO) << "ShowWithTimeout: " << millisec;
-  panel.ShowWindow(SW_SHOWNA);
+  ShowPanelOnTop(panel);
   shown = true;
   SetTimer(panel.m_hWnd, AUTOHIDE_TIMER, static_cast<UINT>(millisec),
            &UIImpl::OnTimer);
@@ -83,17 +95,21 @@ VOID CALLBACK UIImpl::OnTimer(_In_ HWND hwnd,
 }
 
 bool UI::Create(HWND parent) {
-  if (pimpl_) {
-    pimpl_->panel.Create(
-        parent, 0, 0, WS_POPUP,
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-        0U, 0);
-    return true;
+  if (!pimpl_) {
+    pimpl_ = new UIImpl(*this);
+    if (!pimpl_)
+      return false;
   }
 
-  pimpl_ = new UIImpl(*this);
-  if (!pimpl_)
-    return false;
+  if (pimpl_->panel.IsWindow()) {
+    HWND owner = ::GetWindow(pimpl_->panel.m_hWnd, GW_OWNER);
+    if (owner == parent) {
+      return true;
+    }
+
+    pimpl_->Hide();
+    pimpl_->panel.DestroyWindow();
+  }
 
   pimpl_->panel.Create(
       parent, 0, 0, WS_POPUP,

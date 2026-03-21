@@ -2,8 +2,11 @@
 #include "LLMProvider.h"
 #include "DevConsole.h"
 #include <WeaselUtility.h>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <rime_api.h>
 #include <winhttp.h>
+#include <algorithm>
 #include <sstream>
 
 #pragma comment(lib, "winhttp.lib")
@@ -27,6 +30,38 @@ std::string EscapeJsonString(const std::string& s) {
       out += c;
   }
   return out;
+}
+
+std::vector<std::wstring> ParseStringArrayField(
+    const boost::property_tree::ptree& root,
+    const char* field_name) {
+  std::vector<std::wstring> values;
+  const auto child = root.get_child_optional(field_name);
+  if (!child) {
+    return values;
+  }
+
+  for (const auto& item : child.get()) {
+    const std::string value = item.second.get_value<std::string>();
+    if (!value.empty()) {
+      values.push_back(u8tow(value));
+    }
+  }
+  return values;
+}
+
+std::vector<size_t> ParseSizeArrayField(const boost::property_tree::ptree& root,
+                                        const char* field_name) {
+  std::vector<size_t> values;
+  const auto child = root.get_child_optional(field_name);
+  if (!child) {
+    return values;
+  }
+
+  for (const auto& item : child.get()) {
+    values.push_back(static_cast<size_t>(item.second.get_value<int>()));
+  }
+  return values;
 }
 
 }  // namespace
@@ -73,20 +108,22 @@ bool HFConstraintProvider::LoadConfig(const std::string& config_name) {
   if (!rime_api->config_open(config_name.c_str(), &config)) {
     if (g_dev_console && g_dev_console->IsEnabled()) {
       g_dev_console->WriteLine(L"[LLM] LoadConfig失败: 无法打开配置文件 " +
-                              u8tow(config_name));
+                               u8tow(config_name));
     }
     return false;
   }
 
   Bool enabled = false;
-  bool found_enabled = rime_api->config_get_bool(&config, "llm/enabled", &enabled);
+  bool found_enabled =
+      rime_api->config_get_bool(&config, "llm/enabled", &enabled);
 
   if (found_enabled) {
     m_enabled = !!enabled;
   } else {
     m_enabled = false;
     if (g_dev_console && g_dev_console->IsEnabled()) {
-      g_dev_console->WriteLine(L"[LLM] LoadConfig失败: 未找到配置项 llm/enabled");
+      g_dev_console->WriteLine(
+          L"[LLM] LoadConfig失败: 未找到配置项 llm/enabled");
     }
     rime_api->config_close(&config);
     return false;
@@ -103,19 +140,20 @@ bool HFConstraintProvider::LoadConfig(const std::string& config_name) {
   const int BUF_SIZE = 512;
   char buffer[BUF_SIZE + 1] = {0};
 
-  bool found_api_url =
-      rime_api->config_get_string(&config, "llm/hf_constraint/api_url", buffer, BUF_SIZE);
+  bool found_api_url = rime_api->config_get_string(
+      &config, "llm/hf_constraint/api_url", buffer, BUF_SIZE);
   if (found_api_url) {
     m_api_url = buffer;
     if (g_dev_console && g_dev_console->IsEnabled()) {
-      g_dev_console->WriteLine(L"[LLM] 找到配置项 llm/hf_constraint/api_url = " +
-                              u8tow(m_api_url));
+      g_dev_console->WriteLine(
+          L"[LLM] 找到配置项 llm/hf_constraint/api_url = " + u8tow(m_api_url));
     }
   } else {
     m_api_url = "http://localhost:8000/v1/generate/completions";
     if (g_dev_console && g_dev_console->IsEnabled()) {
-      g_dev_console->WriteLine(L"[LLM] 未找到配置项 llm/hf_constraint/api_url，使用默认值 = " +
-                              u8tow(m_api_url));
+      g_dev_console->WriteLine(
+          L"[LLM] 未找到配置项 llm/hf_constraint/api_url，使用默认值 = " +
+          u8tow(m_api_url));
     }
   }
 
@@ -129,34 +167,24 @@ bool HFConstraintProvider::LoadConfig(const std::string& config_name) {
   return true;
 }
 
-std::vector<std::wstring> HFConstraintProvider::PredictCandidates(
-    const std::wstring& context,
-    const std::wstring& current_input,
-    size_t max_candidates) {
+std::vector<std::wstring> HFConstraintProvider::ExecuteRequest(
+    const LLMRequest& request,
+    const LLMPartialCallback& /*on_partial*/) {
   std::vector<std::wstring> candidates;
 
-  if (!IsAvailable() || context.empty()) {
+  if (!IsAvailable() || !llm_request::IsExecutable(request)) {
     return candidates;
   }
 
-  // 允许空上下文（冷启动），仍向后端发送请求，与 RimeWithWeasel 的“支持冷启动”一致
-  std::string prompt_utf8 = wtou8(context);
+  std::wstring prompt_text = llm_request::BuildCompactPrompt(request);
+  if (prompt_text.empty()) {
+    return candidates;
+  }
+  std::string prompt_utf8 = wtou8(prompt_text);
   std::string escaped_prompt = EscapeJsonString(prompt_utf8);
 
-  // pinyin_constraints: 当前输入，按空格分割为拼音音节数组
-  std::vector<std::string> constraint_parts;
-  if (!current_input.empty()) {
-    std::wstringstream ss(current_input);
-    std::wstring part;
-    while (ss >> part) {
-      if (!part.empty()) {
-        constraint_parts.push_back(wtou8(part));
-      }
-    }
-    if (constraint_parts.empty()) {
-      constraint_parts.push_back(wtou8(current_input));
-    }
-  }
+  std::vector<std::string> constraint_parts =
+      llm_request::BuildPinyinConstraintParts(request);
 
   std::ostringstream json;
   json << "{\"prompt\":\"" << escaped_prompt << "\",\"pinyin_constraints\":[";
@@ -171,15 +199,23 @@ std::vector<std::wstring> HFConstraintProvider::PredictCandidates(
 
   extern DevConsole* g_dev_console;
   if (g_dev_console && g_dev_console->IsEnabled()) {
-    g_dev_console->WriteLine(L"[LLM] [HF Constraint] 发送预测请求");
-    g_dev_console->WriteLine(L"  上下文: " + context);
-    g_dev_console->WriteLine(L"  当前输入: " + current_input);
+    g_dev_console->WriteLine(L"[LLM] [HF Constraint] 发送请求");
+    g_dev_console->WriteLine(L"  请求类型: " +
+                             llm_request::GetRequestTypeName(request.type));
+    g_dev_console->WriteLine(L"  上下文: " + request.context);
+    if (!request.current_input.empty()) {
+      g_dev_console->WriteLine(L"  当前输入: " + request.current_input);
+    }
+    if (!request.rime_candidates.empty()) {
+      g_dev_console->WriteLine(L"  Rime候选数: " +
+                               std::to_wstring(request.rime_candidates.size()));
+    }
     g_dev_console->WriteLine(L"  请求URL: " + u8tow(m_api_url));
     g_dev_console->WriteLine(L"  请求体: " + u8tow(request_body));
   }
 
   std::string response_body;
-  if (!ExecuteRequest(m_api_url, request_body, response_body)) {
+  if (!ExecuteHttpRequest(m_api_url, request_body, response_body)) {
     if (g_dev_console && g_dev_console->IsEnabled()) {
       g_dev_console->WriteLine(L"[LLM] [HF Constraint] 请求失败");
     }
@@ -193,8 +229,8 @@ std::vector<std::wstring> HFConstraintProvider::PredictCandidates(
 
   candidates = ParseResponse(response_body);
 
-  if ((size_t)candidates.size() > max_candidates) {
-    candidates.resize(max_candidates);
+  if (candidates.size() > request.max_candidates) {
+    candidates.resize(request.max_candidates);
   }
 
   return candidates;
@@ -204,9 +240,9 @@ bool HFConstraintProvider::IsAvailable() const {
   return m_enabled && !m_api_url.empty();
 }
 
-bool HFConstraintProvider::ExecuteRequest(const std::string& url,
-                                         const std::string& request_body,
-                                         std::string& response_body) {
+bool HFConstraintProvider::ExecuteHttpRequest(const std::string& url,
+                                              const std::string& request_body,
+                                              std::string& response_body) {
   URL_COMPONENTS url_comp = {0};
   url_comp.dwStructSize = sizeof(URL_COMPONENTS);
   url_comp.dwSchemeLength = (DWORD)-1;
@@ -238,17 +274,19 @@ bool HFConstraintProvider::ExecuteRequest(const std::string& url,
 
   if (m_cached_url != url || !hSession || !hConnect) {
     CloseConnection();
-    bool is_localhost = (hostname_str == L"localhost" || hostname_str == L"127.0.0.1");
-    DWORD access_type = is_localhost ? WINHTTP_ACCESS_TYPE_NO_PROXY : WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
-    hSession = WinHttpOpen(
-        L"Weasel IME/1.0", access_type,
-        is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_NAME : NULL,
-        is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_BYPASS : NULL, 0);
+    bool is_localhost =
+        (hostname_str == L"localhost" || hostname_str == L"127.0.0.1");
+    DWORD access_type = is_localhost ? WINHTTP_ACCESS_TYPE_NO_PROXY
+                                     : WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
+    hSession =
+        WinHttpOpen(L"Weasel IME/1.0", access_type,
+                    is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_NAME : NULL,
+                    is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_BYPASS : NULL, 0);
     if (!hSession) {
       return false;
     }
-    DWORD timeout = 10000;
-    WinHttpSetTimeouts(hSession, timeout, timeout, timeout, timeout);
+    // HF 后端冷启动首个请求可能超过 10 秒；放宽接收超时避免首请求被打断。
+    WinHttpSetTimeouts(hSession, 10000, 10000, 15000, 60000);
     hConnect = WinHttpConnect(hSession, hostname_str.c_str(), port, 0);
     if (!hConnect) {
       WinHttpCloseHandle(hSession);
@@ -261,19 +299,16 @@ bool HFConstraintProvider::ExecuteRequest(const std::string& url,
 
   HINTERNET hRequest = WinHttpOpenRequest(
       hConnect, L"POST", path_str.c_str(), NULL, WINHTTP_NO_REFERER,
-      WINHTTP_DEFAULT_ACCEPT_TYPES,
-      use_https ? WINHTTP_FLAG_SECURE : 0);
+      WINHTTP_DEFAULT_ACCEPT_TYPES, use_https ? WINHTTP_FLAG_SECURE : 0);
   if (!hRequest) {
     CloseConnection();
     return false;
   }
 
   std::wstring headers = L"Content-Type: application/json\r\n";
-  if (!WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)-1,
-                          (LPVOID)request_body.c_str(),
-                          (DWORD)request_body.length(),
-                          (DWORD)request_body.length(),
-                          0)) {
+  if (!WinHttpSendRequest(
+          hRequest, headers.c_str(), (DWORD)-1, (LPVOID)request_body.c_str(),
+          (DWORD)request_body.length(), (DWORD)request_body.length(), 0)) {
     WinHttpCloseHandle(hRequest);
     CloseConnection();
     return false;
@@ -308,7 +343,8 @@ std::vector<std::wstring> HFConstraintProvider::ParseResponse(
   std::vector<std::wstring> candidates;
 
   // 解析 "responses" 字段，格式如 {"responses":"螃蟹 披 苹果 泡 葡萄"}
-  const char* field_names[] = {"\"responses\"", "\"text\"", "\"generated_text\"", "\"content\""};
+  const char* field_names[] = {"\"responses\"", "\"text\"",
+                               "\"generated_text\"", "\"content\""};
   size_t content_pos = std::string::npos;
 
   for (const char* field : field_names) {
@@ -347,10 +383,336 @@ std::vector<std::wstring> HFConstraintProvider::ParseResponse(
     return candidates;
   }
 
-  std::string content = json_response.substr(quote_start + 1,
-                                             quote_end - quote_start - 1);
+  std::string content =
+      json_response.substr(quote_start + 1, quote_end - quote_start - 1);
   std::wstring content_w = u8tow(content);
 
+  std::wstringstream ss(content_w);
+  std::wstring word;
+  while (ss >> word) {
+    if (!word.empty()) {
+      candidates.push_back(word);
+    }
+  }
+
+  return candidates;
+}
+
+AlphaRerankProvider::AlphaRerankProvider()
+    : m_enabled(false),
+      m_api_url("http://127.0.0.1:8011/v1/rerank"),
+      m_timeout_ms(120),
+      m_hSession(nullptr),
+      m_hConnect(nullptr) {}
+
+AlphaRerankProvider::~AlphaRerankProvider() {
+  CloseConnection();
+}
+
+void AlphaRerankProvider::CloseConnection() {
+  if (m_hConnect) {
+    WinHttpCloseHandle((HINTERNET)m_hConnect);
+    m_hConnect = nullptr;
+  }
+  if (m_hSession) {
+    WinHttpCloseHandle((HINTERNET)m_hSession);
+    m_hSession = nullptr;
+  }
+  m_cached_url.clear();
+}
+
+bool AlphaRerankProvider::LoadConfig(const std::string& config_name) {
+  extern DevConsole* g_dev_console;
+
+  RimeApi* rime_api = rime_get_api();
+  if (!rime_api) {
+    if (g_dev_console && g_dev_console->IsEnabled()) {
+      g_dev_console->WriteLine(
+          L"[Alpha Rerank] LoadConfig失败: rime_api未初始化");
+    }
+    return false;
+  }
+
+  RimeConfig config = {NULL};
+  if (!rime_api->config_open(config_name.c_str(), &config)) {
+    if (g_dev_console && g_dev_console->IsEnabled()) {
+      g_dev_console->WriteLine(
+          L"[Alpha Rerank] LoadConfig失败: 无法打开配置文件 " +
+          u8tow(config_name));
+    }
+    return false;
+  }
+
+  Bool llm_enabled = false;
+  if (!rime_api->config_get_bool(&config, "llm/enabled", &llm_enabled) ||
+      !llm_enabled) {
+    rime_api->config_close(&config);
+    m_enabled = false;
+    return false;
+  }
+
+  Bool enabled = false;
+  if (!rime_api->config_get_bool(&config, "llm/pinyin_rerank/enabled",
+                                 &enabled) ||
+      !enabled) {
+    rime_api->config_close(&config);
+    m_enabled = false;
+    return false;
+  }
+  m_enabled = true;
+
+  const int BUF_SIZE = 512;
+  char buffer[BUF_SIZE + 1] = {0};
+  std::string provider_type = "alpha_http";
+  if (rime_api->config_get_string(&config, "llm/pinyin_rerank/provider_type",
+                                  buffer, BUF_SIZE)) {
+    provider_type = buffer;
+  }
+  if (provider_type != "alpha_http") {
+    if (g_dev_console && g_dev_console->IsEnabled()) {
+      g_dev_console->WriteLine(L"[Alpha Rerank] 不支持的 provider_type = " +
+                               u8tow(provider_type));
+    }
+    rime_api->config_close(&config);
+    m_enabled = false;
+    return false;
+  }
+
+  if (rime_api->config_get_string(
+          &config, "llm/pinyin_rerank/alpha_http/api_url", buffer, BUF_SIZE)) {
+    m_api_url = buffer;
+  } else {
+    m_api_url = "http://127.0.0.1:8011/v1/rerank";
+  }
+
+  int timeout_ms = 0;
+  if (rime_api->config_get_int(
+          &config, "llm/pinyin_rerank/alpha_http/timeout_ms", &timeout_ms) &&
+      timeout_ms > 0) {
+    m_timeout_ms = timeout_ms;
+  } else {
+    m_timeout_ms = 120;
+  }
+
+  CloseConnection();
+  rime_api->config_close(&config);
+
+  if (g_dev_console && g_dev_console->IsEnabled()) {
+    g_dev_console->WriteLine(L"[Alpha Rerank] 配置加载成功");
+    g_dev_console->WriteLine(L"  api_url: " + u8tow(m_api_url));
+    g_dev_console->WriteLine(L"  timeout_ms: " + std::to_wstring(m_timeout_ms));
+  }
+
+  return true;
+}
+
+std::vector<std::wstring> AlphaRerankProvider::ExecuteRequest(
+    const LLMRequest& request,
+    const LLMPartialCallback& /*on_partial*/) {
+  std::vector<std::wstring> candidates;
+  if (!IsAvailable() || request.type != LLMRequestType::RimeReorder ||
+      request.rime_candidates.empty()) {
+    return candidates;
+  }
+
+  std::ostringstream json;
+  json << "{"
+       << "\"context\":\"" << EscapeJsonString(wtou8(request.context)) << "\","
+       << "\"current_input\":\""
+       << EscapeJsonString(wtou8(request.current_input)) << "\","
+       << "\"candidates\":[";
+  for (size_t i = 0; i < request.rime_candidates.size(); ++i) {
+    if (i > 0) {
+      json << ",";
+    }
+    json << "\"" << EscapeJsonString(wtou8(request.rime_candidates[i])) << "\"";
+  }
+  json << "],\"top_k\":"
+       << (request.max_candidates > 0 ? request.max_candidates
+                                      : request.rime_candidates.size())
+       << "}";
+
+  const std::string request_body = json.str();
+  std::string response_body;
+  if (!ExecuteHttpRequest(m_api_url, request_body, response_body)) {
+    return candidates;
+  }
+
+  m_last_rerank_indices.clear();
+  candidates = ParseResponse(response_body);
+  if (request.max_candidates > 0 &&
+      candidates.size() > request.max_candidates) {
+    candidates.resize(request.max_candidates);
+  }
+  if (request.max_candidates > 0 &&
+      m_last_rerank_indices.size() > request.max_candidates) {
+    m_last_rerank_indices.resize(request.max_candidates);
+  }
+  return candidates;
+}
+
+bool AlphaRerankProvider::IsAvailable() const {
+  return m_enabled && !m_api_url.empty();
+}
+
+bool AlphaRerankProvider::ExecuteHttpRequest(const std::string& url,
+                                             const std::string& request_body,
+                                             std::string& response_body) {
+  URL_COMPONENTS url_comp = {0};
+  url_comp.dwStructSize = sizeof(URL_COMPONENTS);
+  url_comp.dwSchemeLength = (DWORD)-1;
+  url_comp.dwHostNameLength = (DWORD)-1;
+  url_comp.dwUrlPathLength = (DWORD)-1;
+  url_comp.dwExtraInfoLength = (DWORD)-1;
+
+  std::wstring url_w = u8tow(url);
+  wchar_t hostname[256] = {0};
+  wchar_t path[1024] = {0};
+  url_comp.lpszHostName = hostname;
+  url_comp.lpszUrlPath = path;
+
+  if (!WinHttpCrackUrl(url_w.c_str(), (DWORD)url_w.length(), 0, &url_comp)) {
+    return false;
+  }
+
+  INTERNET_PORT port = url_comp.nPort;
+  const bool use_https = (url_comp.nScheme == INTERNET_SCHEME_HTTPS);
+  if (port == 0) {
+    port = use_https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+  }
+
+  std::wstring hostname_str(hostname, url_comp.dwHostNameLength);
+  std::wstring path_str(path, url_comp.dwUrlPathLength);
+
+  HINTERNET hSession = (HINTERNET)m_hSession;
+  HINTERNET hConnect = (HINTERNET)m_hConnect;
+
+  if (m_cached_url != url || !hSession || !hConnect) {
+    CloseConnection();
+    const bool is_localhost =
+        (hostname_str == L"localhost" || hostname_str == L"127.0.0.1");
+    const DWORD access_type = is_localhost ? WINHTTP_ACCESS_TYPE_NO_PROXY
+                                           : WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
+    hSession =
+        WinHttpOpen(L"Weasel IME/1.0", access_type,
+                    is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_NAME : NULL,
+                    is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_BYPASS : NULL, 0);
+    if (!hSession) {
+      return false;
+    }
+    const int receive_timeout = (std::max)(m_timeout_ms, 50);
+    WinHttpSetTimeouts(hSession, 5000, 5000, 5000, receive_timeout);
+    hConnect = WinHttpConnect(hSession, hostname_str.c_str(), port, 0);
+    if (!hConnect) {
+      WinHttpCloseHandle(hSession);
+      return false;
+    }
+    m_hSession = hSession;
+    m_hConnect = hConnect;
+    m_cached_url = url;
+  }
+
+  HINTERNET hRequest = WinHttpOpenRequest(
+      hConnect, L"POST", path_str.c_str(), NULL, WINHTTP_NO_REFERER,
+      WINHTTP_DEFAULT_ACCEPT_TYPES, use_https ? WINHTTP_FLAG_SECURE : 0);
+  if (!hRequest) {
+    CloseConnection();
+    return false;
+  }
+
+  const std::wstring headers = L"Content-Type: application/json\r\n";
+  if (!WinHttpSendRequest(
+          hRequest, headers.c_str(), (DWORD)-1, (LPVOID)request_body.c_str(),
+          (DWORD)request_body.length(), (DWORD)request_body.length(), 0)) {
+    WinHttpCloseHandle(hRequest);
+    CloseConnection();
+    return false;
+  }
+
+  if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    WinHttpCloseHandle(hRequest);
+    CloseConnection();
+    return false;
+  }
+
+  DWORD bytes_available = 0;
+  response_body.clear();
+  while (WinHttpQueryDataAvailable(hRequest, &bytes_available) &&
+         bytes_available > 0) {
+    std::vector<char> buffer(bytes_available);
+    DWORD bytes_read = 0;
+    if (WinHttpReadData(hRequest, buffer.data(), bytes_available,
+                        &bytes_read)) {
+      response_body.append(buffer.data(), bytes_read);
+    } else {
+      break;
+    }
+  }
+
+  WinHttpCloseHandle(hRequest);
+  return !response_body.empty();
+}
+
+std::vector<std::wstring> AlphaRerankProvider::ParseResponse(
+    const std::string& json_response) {
+  std::vector<std::wstring> candidates;
+
+  try {
+    boost::property_tree::ptree root;
+    std::istringstream json_stream(json_response);
+    boost::property_tree::read_json(json_stream, root);
+
+    m_last_rerank_indices = ParseSizeArrayField(root, "ranked_indices");
+    candidates = ParseStringArrayField(root, "ranked_candidates");
+    if (!candidates.empty()) {
+      return candidates;
+    }
+    candidates = ParseStringArrayField(root, "candidates");
+    if (!candidates.empty()) {
+      return candidates;
+    }
+  } catch (...) {
+  }
+
+  const char* field_names[] = {"\"responses\"", "\"content\""};
+  size_t content_pos = std::string::npos;
+  for (const char* field : field_names) {
+    content_pos = json_response.find(field);
+    if (content_pos != std::string::npos) {
+      break;
+    }
+  }
+  if (content_pos == std::string::npos) {
+    return candidates;
+  }
+
+  const size_t colon_pos = json_response.find(':', content_pos);
+  if (colon_pos == std::string::npos) {
+    return candidates;
+  }
+  const size_t quote_start = json_response.find('"', colon_pos);
+  if (quote_start == std::string::npos) {
+    return candidates;
+  }
+
+  size_t quote_end = quote_start + 1;
+  while (quote_end < json_response.size()) {
+    const size_t next = json_response.find('"', quote_end);
+    if (next == std::string::npos) {
+      break;
+    }
+    if (json_response[next - 1] != '\\') {
+      quote_end = next;
+      break;
+    }
+    quote_end = next + 1;
+  }
+  if (quote_end >= json_response.size()) {
+    return candidates;
+  }
+
+  const std::wstring content_w =
+      u8tow(json_response.substr(quote_start + 1, quote_end - quote_start - 1));
   std::wstringstream ss(content_w);
   std::wstring word;
   while (ss >> word) {

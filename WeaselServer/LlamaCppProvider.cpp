@@ -10,6 +10,10 @@
 // 包含 llama.cpp 头文件
 #include "llama.h"
 
+namespace {
+
+}  // namespace
+
 LlamaCppProvider::LlamaCppProvider()
     : m_enabled(false),
       m_n_ctx(2048),
@@ -511,7 +515,8 @@ std::string LlamaCppProvider::GenerateText(const std::string& prompt, size_t max
   }
 
   // 准备批次并生成
-  llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+  llama_batch batch =
+      llama_batch_get_one(prompt_tokens.data(), static_cast<int32_t>(n_prompt_tokens));
   std::string response;
 
   // 耗时统计
@@ -627,7 +632,11 @@ std::string LlamaCppProvider::GenerateText(const std::string& prompt, size_t max
 }
 
 std::vector<std::string> LlamaCppProvider::GenerateCandidatesBatch(
-    const std::string& system_prompt_utf8, const std::string& user_prompt_utf8, size_t n_parallel, int max_new_tokens) {
+    const std::string& system_prompt_utf8,
+    const std::string& user_prompt_utf8,
+    size_t n_parallel,
+    int max_new_tokens,
+    const std::function<bool(const std::vector<std::string>&)>& on_partial) {
   std::vector<std::string> candidates;
   extern DevConsole* g_dev_console;
 
@@ -790,6 +799,15 @@ std::vector<std::string> LlamaCppProvider::GenerateCandidatesBatch(
         candidates[i].append(buf, (size_t)n);
       }
 
+      if (on_partial && !on_partial(candidates)) {
+        if (g_dev_console && g_dev_console->IsEnabled()) {
+          g_dev_console->WriteLine(
+              L"[LLM] GenerateCandidatesBatch: on_partial 请求提前停止");
+        }
+        batch.n_tokens = 0;
+        break;
+      }
+
       const int32_t batch_idx = batch.n_tokens;
       batch.token[batch_idx] = new_token_id;
       if (batch.pos) batch.pos[batch_idx] = (llama_pos)n_cur;
@@ -845,13 +863,12 @@ std::vector<std::string> LlamaCppProvider::GenerateCandidatesBatch(
   return candidates;
 }
 
-std::vector<std::wstring> LlamaCppProvider::PredictCandidates(
-    const std::wstring& context,
-    const std::wstring& current_input,
-    size_t max_candidates) {
+std::vector<std::wstring> LlamaCppProvider::ExecuteRequest(
+    const LLMRequest& request,
+    const LLMPartialCallback& on_partial) {
   std::vector<std::wstring> candidates;
 
-  if (!IsAvailable() || context.empty()) {
+  if (!IsAvailable() || !llm_request::IsExecutable(request)) {
     return candidates;
   }
 
@@ -863,56 +880,89 @@ std::vector<std::wstring> LlamaCppProvider::PredictCandidates(
   auto remove_all_spaces = [](std::wstring& s) {
     s.erase(std::remove(s.begin(), s.end(), L' '), s.end());
   };
+  auto normalize_candidates =
+      [&](const std::vector<std::string>& raw_candidates) {
+        std::vector<std::wstring> normalized;
+        normalized.reserve(raw_candidates.size());
+        for (const auto& raw : raw_candidates) {
+          std::wstring candidate = u8tow(raw);
+          trim_trailing_fffd(candidate);
+          remove_all_spaces(candidate);
+          if (!candidate.empty()) {
+            normalized.push_back(candidate);
+          }
+        }
+        return normalized;
+      };
 
   std::string system_prompt_utf8;
   std::string prompt_utf8;
 
   if (m_instruct_model) {
-    // Instruct 模型：使用指令式 system + user prompt
-    std::wstring system_prompt = L"你是一个智能中文输入法，请根据以下上下文和当前输入，预测接下来最可能出现的" +
-                                 std::to_wstring(max_candidates) + L"个候选词。\n\n"
-                                 L"要求：\n"
-                                 L"1. 只返回候选词，不要任何解释或标点\n"
-                                 L"2. 候选词之间用单个空格分隔\n"
-                                 L"3. 按可能性从高到低排列\n"
-                                 L"4. 如果上下文为空或无关，仅基于当前输入预测\n"
-                                 L"5. 确保候选词都是有效的中文词汇或常用短语\n"
-                                 L"6. 返回词数严格不超过" + std::to_wstring(max_candidates) + L"个\n\n";
-    std::wstring user_prompt = L"上下文：\"" + context + L"\"\n"
-                               L"当前输入：\"" + current_input + L"\"\n"
-                               L"候选词：";
-    system_prompt_utf8 = wtou8(system_prompt);
-    prompt_utf8 = wtou8(user_prompt);
+    llm_request::InstructPrompt prompt =
+        llm_request::BuildInstructPrompt(request);
+    if (prompt.system_prompt.empty() || prompt.user_prompt.empty()) {
+      return candidates;
+    }
+    prompt.system_prompt += L"\n";
+    system_prompt_utf8 = wtou8(prompt.system_prompt);
+    prompt_utf8 = wtou8(prompt.user_prompt);
   } else {
-    // Base 模型：直接使用 context + current_input 作为补全前缀，无额外指令
-    std::wstring context_prefix = context + current_input;
+    std::wstring context_prefix = llm_request::BuildBaseCompletionPrompt(request);
+    if (context_prefix.empty()) {
+      return candidates;
+    }
     system_prompt_utf8.clear();
     prompt_utf8 = wtou8(context_prefix);
   }
 
   extern DevConsole* g_dev_console;
   if (g_dev_console && g_dev_console->IsEnabled()) {
-    g_dev_console->WriteLine(L"[LLM] 发送预测请求 (llama.cpp)");
-    g_dev_console->WriteLine(L"  上下文: " + context);
-    g_dev_console->WriteLine(L"  当前输入: " + current_input);
+    g_dev_console->WriteLine(L"[LLM] 发送请求 (llama.cpp)");
+    g_dev_console->WriteLine(L"  请求类型: " +
+                             llm_request::GetRequestTypeName(request.type));
+    g_dev_console->WriteLine(L"  上下文: " + request.context);
+    if (!request.current_input.empty()) {
+      g_dev_console->WriteLine(L"  当前输入: " + request.current_input);
+    }
+    if (!request.rime_candidates.empty()) {
+      g_dev_console->WriteLine(
+          L"  Rime候选数: " + std::to_wstring(request.rime_candidates.size()));
+    }
   }
 
-  // 当需要多个候选时，使用批量采样（与单次生成一样复用 system KV cache）
-  if (max_candidates > 1) {
+  // 当需要多个候选时，除“重排”外使用批量采样。
+  // Rime 重排需要生成一个完整的“排序后列表”文本，再按空格解析；
+  // 若走批量采样会退化成多个独立补全，无法得到有效重排结果。
+  if (request.type != LLMRequestType::RimeReorder &&
+      request.max_candidates > 1) {
     ULONGLONG start_time = GetTickCount64();
-    std::vector<std::string> raw = GenerateCandidatesBatch(system_prompt_utf8, prompt_utf8, max_candidates, 4);
+    std::vector<std::wstring> last_partial_candidates;
+    const bool enable_token_streaming =
+        request.type == LLMRequestType::NoInputPrediction && !!on_partial;
+    std::vector<std::string> raw = GenerateCandidatesBatch(
+        system_prompt_utf8,
+        prompt_utf8,
+        request.max_candidates,
+        4,
+        enable_token_streaming
+            ? std::function<bool(const std::vector<std::string>&)>(
+                  [&](const std::vector<std::string>& partial_raw_candidates) {
+                    std::vector<std::wstring> partial_candidates =
+                        normalize_candidates(partial_raw_candidates);
+                    if (partial_candidates.empty() ||
+                        partial_candidates == last_partial_candidates) {
+                      return true;
+                    }
+                    last_partial_candidates = partial_candidates;
+                    return on_partial(partial_candidates);
+                  })
+            : nullptr);
     ULONGLONG elapsed_ms = GetTickCount64() - start_time;
     if (g_dev_console && g_dev_console->IsEnabled()) {
       g_dev_console->WriteLine(L"[LLM] 批量采样完成，耗时: " + std::to_wstring(elapsed_ms) + L" ms");
     }
-    for (const auto& s : raw) {
-      std::wstring w = u8tow(s);
-      if (!w.empty()) candidates.push_back(w);
-    }
-    if (!m_instruct_model) {
-      for (auto& c : candidates) trim_trailing_fffd(c);
-    }
-    for (auto& c : candidates) remove_all_spaces(c);
+    candidates = normalize_candidates(raw);
     return candidates;
   }
 
@@ -928,7 +978,13 @@ std::vector<std::wstring> LlamaCppProvider::PredictCandidates(
 
   // 生成文本（单候选或回退）
   ULONGLONG start_time = GetTickCount64();
-  std::string response = GenerateText(prompt_utf8, m_max_tokens);
+  size_t generation_max_tokens = static_cast<size_t>(m_max_tokens);
+  if (request.type == LLMRequestType::RimeReorder) {
+    generation_max_tokens =
+        (std::min<size_t>)(128, (std::max<size_t>)(generation_max_tokens,
+                                                   request.max_candidates * 6));
+  }
+  std::string response = GenerateText(prompt_utf8, generation_max_tokens);
   ULONGLONG end_time = GetTickCount64();
   ULONGLONG elapsed_ms = end_time - start_time;
 
@@ -942,7 +998,7 @@ std::vector<std::wstring> LlamaCppProvider::PredictCandidates(
   std::wstring response_w = u8tow(response);
   std::wstringstream ss(response_w);
   std::wstring word;
-  while (ss >> word && candidates.size() < max_candidates) {
+  while (ss >> word && candidates.size() < request.max_candidates) {
     if (!word.empty()) {
       candidates.push_back(word);
     }

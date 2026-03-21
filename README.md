@@ -1,148 +1,186 @@
 # Wisdom-Weasel
 
-基于 [Rime 小狼毫（Weasel）](https://github.com/rime/weasel) 开源输入法，增加 **基于大语言模型（LLM）的智能预测** 功能：在保留 Rime 全套方案与词库的前提下，用 LLM 根据当前输入与历史上下文生成候选词，支持本地推理与云端 API 多种后端。
+在小狼毫（Weasel）基础上，整合三层能力：
 
----
-![demo](demo.gif)
-## 功能特性
-
-- **多后端 LLM 预测**
-  - **OpenAI 兼容**（`provider_type: openai`）：任意 OpenAI 兼容 API（如 OpenAI、Ollama、本地 openai-api 等），通过 `llm/openai/` 配置。
-  - **llama.cpp 本地**（`provider_type: llamacpp`）：本地 GGUF 模型，内置 llama.cpp 推理，通过 `llm/llamacpp/` 配置。
-  - **HF Constraint**（`provider_type: hf_constraint`）：支持拼音约束生成Python后端，通过 `llm/hf_constraint/` 配置。
-- **上下文历史**：维护用户最近输入词序列，作为 LLM 预测的上下文。
-- **可选记忆压缩**：历史超过容量时，可异步调用单独配置的 LLM（`llm/memory/`）将旧词压缩为摘要，节省上下文长度。
-- **与 Rime 并存**：预测候选与 Rime 方案候选一起展示，不改变原有方案、词库与部署流程。
+1. **万象拼音**：负责词库、语法模型、长句与 Rime 方案层能力
+2. **Alpha 重排**：负责有拼音场景下的候选实时排序
+3. **LLM 预测**：负责无拼音预测、多后端推理与上下文联想
 
 ---
 
-## 系统要求
+## 当前架构
 
-- **操作系统**：Windows 8.1 ~ Windows 11  
-- **运行环境**：与官方小狼毫相同（需先安装/部署 Rime）  
-- **LLM 可选**：  
-  - 使用 `openai` 时需可访问的 API 或本地服务（如 Ollama）；  
-  - 使用 `llamacpp` 时需本机加载 GGUF 模型（建议 4GB+ 显存或足够内存）；  
-  - 使用 `hf_constraint` 需要创建Python环境，`hf_backend\requirements.txt`。
+### 有拼音输入
 
----
-
-## 安装与构建
-
-- **直接使用**：从 [Releases](https://github.com/scukeqi/Wisdom-Weasel/releases)下载安装包，安装后与官方小狼毫一样使用。
-  - 配置初始拼音输入方案,如：[雾凇拼音](https://github.com/iDvel/rime-ice)等。
-  - `weasel.yaml` 中启用并配置 LLM 。
-- **从源码构建**：  
-  - 运行 `build.bat x64`  
-  - 依赖与官方 Weasel 一致（如 Boost、librime、yaml-cpp 等，见项目与 `weasel.props`）。  
-  - 若使用 `llamacpp`，需要从[llamacpp](https://github.com/ggml-org/llama.cpp/releases)获取dll。
-
----
-
-## LLM 配置说明
-
-配置写在 **Rime 用户目录** 下的 `weasel.yaml`中。
-### 总开关与提供者类型
-
-```yaml
-llm:
-  enabled: true
-  provider_type: openai   # 可选: openai | llamacpp | hf_constraint
+```text
+拼音输入
+-> 万象拼音生成候选
+-> Alpha 对候选重排
+-> 第一候选固定，后续候选低延迟重排
 ```
 
-### 1. OpenAI 兼容（`provider_type: openai`）
+### 无拼音输入
 
-适用于 OpenAI、Ollama、本地 openai-api 等：
-
-```yaml
-llm:
-  enabled: true
-  provider_type: openai
-  openai:
-    api_url: "https://api.openai.com/v1/chat/completions"   # 或 Ollama 等地址
-    api_key: "your-api-key"   # 本地服务可留空
-    model: "gpt-3.5-turbo"
-    max_tokens: 20
-    temperature: "0.6"
+```text
+最近上下文
+-> LLM provider
+-> 先给一个短结果
+-> 再补一个短语
+-> 再补一个长句
 ```
-
-### 2. llama.cpp 本地（`provider_type: llamacpp`）
-
-本地 GGUF 模型，无需额外服务：
-
-```yaml
-llm:
-  enabled: true
-  provider_type: llamacpp
-  llamacpp:
-    model_path: "D:/models/your_model.gguf"
-    n_ctx: 2048
-    n_gpu_layers: -1
-    max_tokens: 8
-    temperature: "0.6"
-    n_threads: 4
-    model_type: "Instruct"   # 或 推荐"Base" 
-```
-
-### 3. HF Constraint（`provider_type: hf_constraint`）
-[hf_backend 详细配置步骤](https://github.com/scukeqi/Wisdom-Weasel/blob/main/hf_backend/README.md)
-
-拼音约束接口，请求体形如：`{"prompt": "历史上下文", "pinyin_constraints": ["当前输入"]}`：
-
-```yaml
-llm:
-  enabled: true
-  provider_type: hf_constraint
-  hf_constraint:
-    api_url: "http://localhost:8000/v1/generate/completions"
-```
-推荐使用Base模型
-### 可选：记忆压缩（`llm/memory/`）
-
-当上下文历史超过容量时，可用单独配置的 LLM 将旧词压缩为摘要（与预测用 LLM 分离）：
-
-```yaml
-llm:
-  memory:
-    enabled: true
-    api_url: "https://api.openai.com/v1/chat/completions"
-    api_key: "your-api-key"
-    model: "gpt-3.5-turbo"
-    max_tokens: 200
-```
-
-不配置或 `enabled: false` 时，不进行记忆压缩，仅使用固定长度的最近上下文。
-
-### 启用调试日志终端输出
-
-```yaml
-dev_console:
-  enabled: true
-```
----
-
-## 使用说明
-
-- 安装/构建完成后，与官方小狼毫相同：在输入法指示器中选择【中】图标即可使用。  
-- 通过右键托盘图标 **小狼毫输入法** 可访问「用户文件夹」「重新部署」等。  
-- 修改 `weasel.yaml` 中 LLM 相关配置后，需要 **重新部署** 或重启 Weasel 服务后生效。  
-
 
 ---
 
-## 致谢与许可证
+## 默认内置内容
 
-- 本分支在 [Rime 小狼毫（Weasel）](https://github.com/rime/weasel) 基础上开发，致谢原项目作者与社区。  
-- 输入方案与程序设计、美术、引用开源软件等说明见 [原仓库](https://github.com/rime/weasel)。  
-- **许可证**：GPLv3（与 Weasel 一致）。  
-- 项目主页：https://rime.im  
+### Rime 方案
+
+- `wanxiang`
+- `wanxiang_pro`
+
+### Alpha CPU 实时重排默认模型
+
+- `qwen3-0.6b-onnx-int8`
+- `qwen3-0.6b-embeddings_lmdb`
+
+### LLM 预测后端
+
+- `openai`
+- `llamacpp`
+- `hf_constraint`
 
 ---
 
-## 问题与反馈
+## 发行版安装方式
 
-- 本分支（LLM 预测功能、构建与配置）相关问题，请在本仓库 [Issues](https://github.com/scukeqi/Wisdom-Weasel/issues) 中反馈。  
-- Rime 输入法通用问题（方案、词库、部署等），请反馈至 [Rime 之家](https://github.com/rime/home/issues)。  
-- 欢迎提交 Pull Request。
+发行版会附带：
 
-谢谢使用。
+- 编译后的 `output/`
+- 万象方案文件
+- Alpha runtime
+- Alpha 模型文件
+- 一键安装脚本
+
+### 一键安装入口
+
+双击：
+
+```text
+Install-Wisdom-Weasel.cmd
+```
+
+或运行：
+
+```powershell
+.\scripts\Install-Wisdom-Weasel.ps1
+```
+
+安装器会：
+
+1. 让用户选择安装目录  
+   - 默认建议：`C:\Program Files\Rime\weasel-0.17.4`
+2. 用发行包中的 `output/` 覆盖目标目录
+3. 复制 Alpha 模型与运行时
+4. 安装万象到用户 Rime 目录
+5. 自动生成并启用 `alpha_rerank` 配置
+6. 重新部署 Rime
+7. 打开 GUI 与用户目录，引导用户继续调整配置
+
+---
+
+## GUI 后续引导
+
+安装完成后，建议用户在 GUI 中完成以下动作：
+
+1. 打开 **小狼毫输入法设定**
+2. 勾选：
+   - `wanxiang`
+   - `wanxiang_pro`
+3. 检查或修改：
+   - `weasel.custom.yaml`
+   - `wanxiang.custom.yaml`
+   - `wanxiang_pro.custom.yaml`
+
+---
+
+## 关键配置
+
+### Alpha 重排
+
+安装器会自动生成：
+
+```yaml
+patch:
+  alpha_rerank/enabled: true
+  alpha_rerank/max_candidates: 6
+  alpha_rerank/context_max_chars: 64
+  alpha_rerank/recent_tail_chars: 16
+  alpha_rerank/order_prior_weight: 0.02
+```
+
+特性：
+
+- 第一候选不改
+- 只重排后续候选
+- 自动截断长上下文
+- 适配 CPU 实时场景
+
+### LLM 无拼音预测
+
+当前本地 Ollama 路径下默认策略：
+
+- 先给一个**短结果**
+- 再补一个**短语**
+- 再补一个**长句**
+
+目的是降低首候选等待时间，同时保持补全丰富度。
+
+---
+
+## 从源码构建
+
+PowerShell 推荐：
+
+```powershell
+$env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64;'
+.\build.bat rebuild x64
+```
+
+### 生成发行包
+
+```powershell
+.\scripts\Build-ReleaseBundle.ps1
+```
+
+生成结果：
+
+- 发行目录：`archives/Wisdom-Weasel-<version>/`
+- 压缩包：`archives/Wisdom-Weasel-<version>-bundle.7z`
+
+---
+
+## 重要脚本
+
+- `scripts/Install-Wisdom-Weasel.ps1`
+  - 一键安装发行版
+- `scripts/Install-RimeWanxiang.ps1`
+  - 单独安装万象到 Rime 用户目录
+- `scripts/Build-ReleaseBundle.ps1`
+  - 组装发行目录并打包
+
+---
+
+## 文档
+
+- 最终架构说明：`docs/final_architecture.md`
+- Alpha 集成说明：`docs/alpha_rerank_integration.md`
+
+---
+
+## 备注
+
+- 万象是**方案层 / 长句语法层**
+- Alpha 是**候选排序层**
+- LLM 是**你自己的预测层**
+
+三者职责分离，不再混用。

@@ -287,3 +287,17 @@ bool WeaselTSF::_EnsureServerConnected() {
     return true;
   }
 }
+
+void WeaselTSF::_PollServerUpdate() {
+  if (!_EnsureServerConnected() || !_IsComposing()) {
+    return;
+  }
+
+  com_ptr<ITfContext> pContext = _GetUIContextDocument();
+  if (pContext == nullptr) {
+    return;
+  }
+
+  m_client.ProcessKeyEvent(0);
+  _UpdateComposition(pContext);
+}

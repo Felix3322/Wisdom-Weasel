@@ -9,7 +9,11 @@ using namespace std;
 using namespace weasel;
 
 CCandidateList::CCandidateList(com_ptr<WeaselTSF> pTextService)
-    : _ui(make_unique<UI>()), _tsf(pTextService), _pbShow(TRUE) {
+    : _ui(make_unique<UI>()),
+      _tsf(pTextService),
+      _pbShow(TRUE),
+      _asyncPolling(false),
+      _asyncPollHwnd(NULL) {
   _cRef = 1;
 }
 
@@ -215,6 +219,12 @@ void CCandidateList::UpdateUI(const Context& ctx, const Status& status) {
     Show(_pbShow);
   else
     Show(FALSE);
+
+  if (status.composing && _pbShow) {
+    _StartAsyncPoll();
+  } else {
+    _StopAsyncPoll();
+  }
 }
 
 void CCandidateList::UpdateStyle(const UIStyle& sty) {
@@ -227,12 +237,14 @@ void CCandidateList::UpdateInputPosition(RECT const& rc) {
 
 void CCandidateList::Destroy() {
   // EndUI();
+  _StopAsyncPoll();
   Show(FALSE);
   _DisposeUIWindow();
 }
 
 void CCandidateList::DestroyAll() {
   // EndUI();
+  _StopAsyncPoll();
   Show(FALSE);
   _DisposeUIWindowAll();
 }
@@ -311,6 +323,7 @@ void CCandidateList::StartUI() {
 }
 
 void CCandidateList::EndUI() {
+  _StopAsyncPoll();
   com_ptr<ITfThreadMgr> pThreadMgr = _tsf->_GetThreadMgr();
   if (pThreadMgr) {
     com_ptr<ITfUIElementMgr> emgr;
@@ -321,6 +334,52 @@ void CCandidateList::EndUI() {
       emgr->EndUIElement(uiid);
   }
   _DisposeUIWindow();
+}
+
+void CCandidateList::_StartAsyncPoll() {
+  if (_asyncPolling || _ui == nullptr || !_ui->IsShown()) {
+    return;
+  }
+
+  HWND hwnd = _GetActiveWnd();
+  if (hwnd == NULL) {
+    return;
+  }
+
+  if (::SetTimer(hwnd, reinterpret_cast<UINT_PTR>(this), ASYNC_POLL_INTERVAL_MS,
+                 &CCandidateList::OnAsyncPollTimer) != 0) {
+    _asyncPolling = true;
+    _asyncPollHwnd = hwnd;
+  }
+}
+
+void CCandidateList::_StopAsyncPoll() {
+  if (!_asyncPolling) {
+    return;
+  }
+
+  if (_asyncPollHwnd != NULL) {
+    ::KillTimer(_asyncPollHwnd, reinterpret_cast<UINT_PTR>(this));
+  }
+  _asyncPolling = false;
+  _asyncPollHwnd = NULL;
+}
+
+VOID CALLBACK CCandidateList::OnAsyncPollTimer(_In_ HWND /*hwnd*/,
+                                               _In_ UINT /*uMsg*/,
+                                               _In_ UINT_PTR idEvent,
+                                               _In_ DWORD /*dwTime*/) {
+  CCandidateList* self = reinterpret_cast<CCandidateList*>(idEvent);
+  if (self == nullptr || self->_tsf == nullptr || !self->_asyncPolling) {
+    return;
+  }
+
+  if (!self->_tsf->_IsComposing()) {
+    self->_StopAsyncPoll();
+    return;
+  }
+
+  self->_tsf->_PollServerUpdate();
 }
 
 com_ptr<ITfContext> CCandidateList::GetContextDocument() {
