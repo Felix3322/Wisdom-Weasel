@@ -26,10 +26,6 @@ end
 
 local alpha_core = try_require_alpha_core()
 
-if alpha_core and log and log.warning then
-    log.warning("[alpha_rerank] alpha_rerank_core module loaded")
-end
-
 local M = {}
 
 local DEFAULT_CONTEXT_MAX_CHARS = 96
@@ -37,6 +33,7 @@ local DEFAULT_MAX_CANDIDATES = 8
 local DEFAULT_MAX_NEGATIVE_CANDIDATES = 3
 local DEFAULT_RECENT_TAIL_CHARS = 24
 local DEFAULT_ORDER_PRIOR_WEIGHT = 0.03
+local DEFAULT_PRESERVE_FIRST_MIN_CHARS = 5
 
 local function log_warn(message)
     if log and log.warning then
@@ -53,9 +50,7 @@ local function log_info(message)
 end
 
 local function emit_log(env, message)
-    if env and env.log_enabled then
-        log_info("[alpha_rerank] " .. message)
-    end
+    return nil
 end
 
 local function trim_spaces(text)
@@ -361,6 +356,45 @@ local function make_signature(rerank_context, candidates)
     })
 end
 
+local function maybe_prewarm_rerank_context(env, trigger)
+    if not env or not env.backend_ready or not env.core or type(env.core.warm_query) ~= "function" then
+        return
+    end
+
+    local history_context = get_recent_text_context(env)
+    local rerank_context = build_rerank_context(history_context, env.recent_tail_chars)
+    rerank_context = clamp_tail_text(rerank_context, env.context_max_chars)
+    if rerank_context == "" then
+        return
+    end
+
+    local warm_signature = rerank_context
+    if env.last_prewarm_signature == warm_signature then
+        return
+    end
+
+    local started_at = rime_api and rime_api.get_time_ms and rime_api.get_time_ms() or nil
+    local ok, err = env.core.warm_query(rerank_context)
+    local finished_at = rime_api and rime_api.get_time_ms and rime_api.get_time_ms() or nil
+    if not ok then
+        if env.log_enabled then
+            emit_log(env, "prewarm skipped: " .. tostring(err))
+        end
+        return
+    end
+
+    env.last_prewarm_signature = warm_signature
+    if env.log_enabled then
+        local elapsed_ms = (started_at and finished_at) and (finished_at - started_at) or -1
+        emit_log(env,
+            string.format(
+                "prewarm done, trigger=%s, context_chars=%d, elapsed_ms=%d",
+                tostring(trigger or "unknown"),
+                utf8_len(rerank_context),
+                elapsed_ms))
+    end
+end
+
 join_candidate_preview = function(candidates)
     local preview = {}
     for i = 1, #candidates do
@@ -375,6 +409,20 @@ local function clone_text_array(values)
         cloned[i] = values[i]
     end
     return cloned
+end
+
+local function should_preserve_first_candidate(env, candidate)
+    if not candidate then
+        return false
+    end
+
+    local text = trim_spaces(candidate.text or "")
+    if text == "" then
+        return false
+    end
+
+    local min_chars = (env and env.preserve_first_min_chars) or DEFAULT_PRESERVE_FIRST_MIN_CHARS
+    return utf8_len(text) >= min_chars
 end
 
 local function remember_feedback_session(env, fixed_first_text, reordered_texts)
@@ -457,6 +505,9 @@ local function rerank_candidates(env, context, current_input, candidates)
     local rerank_context = build_rerank_context(context, env.recent_tail_chars)
     rerank_context = clamp_tail_text(rerank_context, env.context_max_chars)
     if rerank_context == "" then
+        if env.log_enabled then
+            emit_log(env, "skip rerank: empty history context")
+        end
         return nil
     end
 
@@ -508,7 +559,7 @@ local function rerank_candidates(env, context, current_input, candidates)
     if env.log_enabled then
         emit_log(env,
             string.format(
-                "rerank done, input=%s, context_chars=%d, pool=%d, elapsed_ms=%d",
+                "rerank done, ime_input=%s, context_chars=%d, pool=%d, elapsed_ms=%d",
                 tostring(current_input),
                 utf8_len(rerank_context),
                 #candidates,
@@ -528,6 +579,8 @@ function M.init(env)
     env.context_max_chars = config:get_int("alpha_rerank/context_max_chars") or DEFAULT_CONTEXT_MAX_CHARS
     env.recent_tail_chars = config:get_int("alpha_rerank/recent_tail_chars") or DEFAULT_RECENT_TAIL_CHARS
     env.order_prior_weight = config:get_double("alpha_rerank/order_prior_weight") or DEFAULT_ORDER_PRIOR_WEIGHT
+    env.preserve_first_min_chars = config:get_int("alpha_rerank/preserve_first_min_chars") or
+        DEFAULT_PRESERVE_FIRST_MIN_CHARS
     env.prefer_sentence_boundary = config:get_bool("alpha_rerank/prefer_sentence_boundary")
     if env.prefer_sentence_boundary == nil then env.prefer_sentence_boundary = true end
     env.log_enabled = config:get_bool("alpha_rerank/log_enabled")
@@ -541,6 +594,8 @@ function M.init(env)
     env.preference_sync_disabled = false
     env.preference_history_snapshot = get_commit_history_segments(env)
     env.last_feedback_session = nil
+    env.last_prewarm_signature = nil
+    env.commit_notifier = nil
 
     if not env.enabled then
         return
@@ -564,17 +619,23 @@ function M.init(env)
     })
     if ok then
         env.backend_ready = true
+        if env.engine and env.engine.context and env.engine.context.commit_notifier then
+            env.commit_notifier = env.engine.context.commit_notifier:connect(function(_)
+                maybe_prewarm_rerank_context(env, "commit")
+            end)
+        end
         emit_log(env, "configured successfully")
         emit_log(env, "config_path=" .. config_path)
         emit_log(env, "dll_path=" .. (dll_path ~= "" and dll_path or "<auto>"))
         emit_log(env,
             string.format(
-                "settings: max_candidates=%d, max_negative_candidates=%d, context_max_chars=%d, recent_tail_chars=%d, order_prior_weight=%.3f",
+                "settings: max_candidates=%d, max_negative_candidates=%d, context_max_chars=%d, recent_tail_chars=%d, order_prior_weight=%.3f, preserve_first_min_chars=%d",
                 env.max_candidates,
                 env.max_negative_candidates,
                 env.context_max_chars,
                 env.recent_tail_chars,
-                env.order_prior_weight))
+                env.order_prior_weight,
+                env.preserve_first_min_chars))
     else
         log_warn("[alpha_rerank] configure failed: " .. tostring(err or "unknown error"))
     end
@@ -593,6 +654,7 @@ function M.func(input, env)
     end
 
     sync_user_preference(env)
+    maybe_prewarm_rerank_context(env, "filter")
 
     local seg = context.composition and context.composition:back() or nil
     if not seg or not tags_match(seg, env) then
@@ -616,11 +678,13 @@ function M.func(input, env)
         return
     end
 
-    local fixed_first = all_candidates[1]
+    local preserve_first = should_preserve_first_candidate(env, all_candidates[1])
+    local fixed_first = preserve_first and all_candidates[1] or nil
     local rerank_pool = {}
     local rerank_texts = {}
     local pool_limit = math.min(#all_candidates, env.max_candidates)
-    for i = 2, pool_limit do
+    local pool_start = preserve_first and 2 or 1
+    for i = pool_start, pool_limit do
         local cand = all_candidates[i]
         local text = cand and cand.text or ""
         if text and text ~= "" then
@@ -638,8 +702,9 @@ function M.func(input, env)
     if env.log_enabled then
         emit_log(env,
             string.format(
-                "input=%s, fixed_first=%s, history_chars=%d, rerank_pool=%d",
+                "ime_input=%s, preserve_first=%s, fixed_first=%s, history_chars=%d, rerank_pool=%d",
                 tostring(current_input),
+                tostring(preserve_first),
                 tostring(fixed_first and fixed_first.text or ""),
                 utf8_len(history_context),
                 #rerank_pool))
@@ -686,10 +751,15 @@ function M.func(input, env)
 end
 
 function M.fini(env)
+    if env.commit_notifier then
+        env.commit_notifier:disconnect()
+        env.commit_notifier = nil
+    end
     env.last_signature = nil
     env.last_order = nil
     env.preference_history_snapshot = nil
     env.last_feedback_session = nil
+    env.last_prewarm_signature = nil
 end
 
 return M

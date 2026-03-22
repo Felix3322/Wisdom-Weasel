@@ -80,6 +80,8 @@ using AlphaPredictiveComputeOrderedFn = int(__cdecl*)(
     const char* const*,
     int,
     SimilarityResult**);
+using AlphaPredictiveWarmQueryFn =
+    int(__cdecl*)(AlphaPredictiveHandle, const char*);
 using AlphaPredictiveApplyFeedbackFn = int(__cdecl*)(
     AlphaPredictiveHandle,
     const char*,
@@ -95,6 +97,7 @@ struct AlphaLibrary {
   AlphaPredictiveNewFn create = nullptr;
   AlphaPredictiveFreeFn destroy = nullptr;
   AlphaPredictiveComputeOrderedFn compute_ordered = nullptr;
+  AlphaPredictiveWarmQueryFn warm_query = nullptr;
   AlphaPredictiveApplyFeedbackFn apply_feedback = nullptr;
   AlphaPredictiveUpdatePreferenceFn update_preference = nullptr;
   AlphaPredictiveFreeResultFn free_result = nullptr;
@@ -190,6 +193,7 @@ void ResetLibraryUnlocked() {
   g_alpha.create = nullptr;
   g_alpha.destroy = nullptr;
   g_alpha.compute_ordered = nullptr;
+  g_alpha.warm_query = nullptr;
   g_alpha.apply_feedback = nullptr;
   g_alpha.update_preference = nullptr;
   g_alpha.free_result = nullptr;
@@ -288,6 +292,8 @@ bool LoadAlphaLibraryUnlocked(const std::wstring& library_path,
       GetProcAddress(module, "alpha_predictive_free"));
   auto compute = reinterpret_cast<AlphaPredictiveComputeOrderedFn>(
       GetProcAddress(module, "alpha_predictive_compute_similarities_ordered"));
+  auto warm_query = reinterpret_cast<AlphaPredictiveWarmQueryFn>(
+      GetProcAddress(module, "alpha_predictive_warm_query"));
   auto apply_feedback = reinterpret_cast<AlphaPredictiveApplyFeedbackFn>(
       GetProcAddress(module, "alpha_predictive_apply_user_feedback"));
   auto update_preference = reinterpret_cast<AlphaPredictiveUpdatePreferenceFn>(
@@ -306,6 +312,7 @@ bool LoadAlphaLibraryUnlocked(const std::wstring& library_path,
   g_alpha.create = create;
   g_alpha.destroy = destroy;
   g_alpha.compute_ordered = compute;
+  g_alpha.warm_query = warm_query;
   g_alpha.apply_feedback = apply_feedback;
   g_alpha.update_preference = update_preference;
   g_alpha.free_result = free_result;
@@ -432,6 +439,31 @@ int LuaComputeSimilarities(lua_State* L) {
   return 1;
 }
 
+int LuaWarmQuery(lua_State* L) {
+  const std::string input = LuaCheckString(L, 1);
+  if (input.empty()) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+
+  std::lock_guard<std::mutex> lock(g_alpha_mutex);
+  if (!g_alpha.predictor) {
+    return PushNilError(L, "alpha_rerank_core is not configured");
+  }
+  if (!g_alpha.warm_query) {
+    return PushNilError(
+        L, "alpha_input.dll does not export alpha_predictive_warm_query");
+  }
+
+  const int status = g_alpha.warm_query(g_alpha.predictor, input.c_str());
+  if (status != 0) {
+    return PushNilError(L, "alpha_input warm_query failed");
+  }
+
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 int LuaUpdateUserPreference(lua_State* L) {
   const std::string committed_text = LuaCheckString(L, 1);
   if (committed_text.empty()) {
@@ -515,6 +547,7 @@ const luaL_Reg kModuleFunctions[] = {
     {"reset", LuaReset},
     {"is_ready", LuaIsReady},
     {"compute_similarities", LuaComputeSimilarities},
+    {"warm_query", LuaWarmQuery},
     {"apply_user_feedback", LuaApplyUserFeedback},
     {"update_user_preference", LuaUpdateUserPreference},
     {"version", LuaVersion},

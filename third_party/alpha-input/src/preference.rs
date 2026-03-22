@@ -15,6 +15,9 @@ pub struct PreferenceConfig {
     pub persistence_path: Option<PathBuf>,
     pub blend_weight: f32,
     pub negative_weight: f32,
+    pub dynamic_min_factor: f32,
+    pub dynamic_max_factor: f32,
+    pub dynamic_softmax_temperature: f32,
     pub session_weight: f32,
     pub long_term_weight: f32,
     pub session_alpha: f32,
@@ -29,6 +32,12 @@ impl PreferenceConfig {
     pub fn sanitize(mut self) -> Self {
         self.blend_weight = self.blend_weight.clamp(0.0, 1.0);
         self.negative_weight = self.negative_weight.clamp(0.0, 1.0);
+        self.dynamic_min_factor = self.dynamic_min_factor.clamp(0.0, 1.0);
+        self.dynamic_max_factor = self.dynamic_max_factor.clamp(0.0, 1.0);
+        if self.dynamic_min_factor > self.dynamic_max_factor {
+            std::mem::swap(&mut self.dynamic_min_factor, &mut self.dynamic_max_factor);
+        }
+        self.dynamic_softmax_temperature = self.dynamic_softmax_temperature.max(EPSILON);
         self.session_weight = self.session_weight.max(0.0);
         self.long_term_weight = self.long_term_weight.max(0.0);
         self.session_alpha = self.session_alpha.clamp(0.0, 1.0);
@@ -68,12 +77,14 @@ impl PreferenceScorer {
         }
     }
 
-    pub fn score(&self, candidate: &Array1<f32>, candidate_norm: f32) -> f32 {
+    pub fn score(&self, candidate: &Array1<f32>, candidate_norm: f32, dynamic_factor: f32) -> f32 {
         if !self.config.enabled || candidate_norm <= EPSILON {
             return 0.0;
         }
 
-        let positive_score = self.config.blend_weight
+        let dynamic_factor = dynamic_factor.clamp(0.0, 1.0);
+
+        let positive_score = (self.config.blend_weight * dynamic_factor)
             * weighted_preference_score(
                 candidate,
                 candidate_norm,
@@ -86,7 +97,7 @@ impl PreferenceScorer {
                 self.config.min_long_term_updates,
             );
 
-        let negative_score = self.config.negative_weight
+        let negative_score = (self.config.negative_weight * dynamic_factor)
             * weighted_preference_score(
                 candidate,
                 candidate_norm,
@@ -100,6 +111,54 @@ impl PreferenceScorer {
             );
 
         positive_score - negative_score
+    }
+
+    pub fn dynamic_weight_factor(&self, semantic_scores: &[f32]) -> f32 {
+        if !self.config.enabled
+            || semantic_scores.len() <= 1
+            || (self.config.dynamic_max_factor - self.config.dynamic_min_factor).abs() <= EPSILON
+        {
+            return self.config.dynamic_max_factor;
+        }
+
+        let max_score = semantic_scores
+            .iter()
+            .copied()
+            .fold(f32::NEG_INFINITY, f32::max);
+        if !max_score.is_finite() {
+            return self.config.dynamic_max_factor;
+        }
+
+        let temperature = self.config.dynamic_softmax_temperature;
+        let mut weights = Vec::with_capacity(semantic_scores.len());
+        let mut weight_sum = 0.0;
+        for score in semantic_scores {
+            let weight = ((*score - max_score) / temperature).exp();
+            weights.push(weight);
+            weight_sum += weight;
+        }
+
+        if weight_sum <= EPSILON {
+            return self.config.dynamic_max_factor;
+        }
+
+        let mut entropy = 0.0;
+        for weight in weights {
+            let probability = weight / weight_sum;
+            if probability > EPSILON {
+                entropy -= probability * probability.ln();
+            }
+        }
+
+        let max_entropy = (semantic_scores.len() as f32).ln();
+        let ambiguity = if max_entropy > EPSILON {
+            (entropy / max_entropy).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+
+        self.config.dynamic_min_factor
+            + ambiguity * (self.config.dynamic_max_factor - self.config.dynamic_min_factor)
     }
 }
 

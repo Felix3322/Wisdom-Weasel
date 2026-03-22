@@ -1,5 +1,5 @@
 use crate::model::Model;
-use ndarray::{Array, Array2, Axis, CowArray};
+use ndarray::{Array, Array2, Axis, CowArray, s};
 use num_traits::FromPrimitive;
 use onnxruntime::TypeToTensorElementDataType;
 use ort::{Environment, OrtError, Session, SessionBuilder, Value, tensor::TensorDataToType};
@@ -146,32 +146,38 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
         // The shape is typically (batch_size, sequence_length, hidden_size).
         let shape = last_hidden_state_view.shape();
         debug!("Output tensor shape: {:?}", shape);
-        if shape.len() != 3 {
+        if shape.len() != 3 || shape[0] == 0 || shape[2] == 0 {
             info!("Unexpected output shape: {:?}", shape);
             return Err(GeneralError::UnexpectedShape(shape.to_vec()));
         }
 
-        // Directly convert the f32 view to an owned ArrayD<T> using `mapv`.
-        // This avoids intermediate Vec allocations and is more efficient.
-        let hidden_state_t = last_hidden_state_view.mapv(|val| T::from_f32(val).unwrap());
+        let valid_seq_length = seq_length.min(shape[1]);
+        if valid_seq_length == 0 {
+            info!("Empty valid token span after masking.");
+            return Err(GeneralError::EmptySequence);
+        }
+        if valid_seq_length != seq_length {
+            debug!(
+                "Clamped valid sequence length from {} to {} based on output shape.",
+                seq_length, valid_seq_length
+            );
+        }
 
-        // Reshape to 2D: (batch_size * sequence_length, hidden_size)
-        let array = hidden_state_t
-            .into_shape((shape[0] * shape[1], shape[2]))
-            .map_err(|e| {
-                debug!("Reshape error: {}", e);
-                GeneralError::Reshape(e.to_string())
-            })?;
-        trace!("Reshaped array shape: {:?}", array.shape());
-
-        // Extract the embedding for the last token.
-        let last_token_vec = array.row(seq_length - 1).to_owned().insert_axis(Axis(0));
+        let batch_hidden_state = last_hidden_state_view.index_axis(Axis(0), 0);
+        let mean_pooled = batch_hidden_state
+            .slice(s![0..valid_seq_length, ..])
+            .mean_axis(Axis(0))
+            .ok_or(GeneralError::EmptySequence)?;
+        let mean_pooled_vec = mean_pooled
+            .mapv(|val| T::from_f32(val).unwrap())
+            .insert_axis(Axis(0));
         debug!(
-            "Extracted last token vector. Shape: {:?}",
-            last_token_vec.shape()
+            "Extracted mean pooled vector across {} tokens. Shape: {:?}",
+            valid_seq_length,
+            mean_pooled_vec.shape()
         );
 
-        Ok(last_token_vec)
+        Ok(mean_pooled_vec)
     }
 
     fn tokenizer(&self) -> &Tokenizer {

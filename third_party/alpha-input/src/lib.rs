@@ -11,10 +11,8 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int};
 use std::path::{Path, PathBuf};
 use std::ptr;
-use std::sync::Once;
 use thiserror::Error;
-use tracing::{Level, info};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
 
 #[derive(Error, Debug)]
 pub enum AlphaError {
@@ -111,6 +109,15 @@ impl AlphaPredictive {
             negative_weight: config
                 .get_float("preference.negative_weight")
                 .unwrap_or(0.06) as f32,
+            dynamic_min_factor: config
+                .get_float("preference.dynamic_min_factor")
+                .unwrap_or(0.2) as f32,
+            dynamic_max_factor: config
+                .get_float("preference.dynamic_max_factor")
+                .unwrap_or(1.0) as f32,
+            dynamic_softmax_temperature: config
+                .get_float("preference.dynamic_softmax_temperature")
+                .unwrap_or(0.025) as f32,
             session_weight: config
                 .get_float("preference.session_weight")
                 .unwrap_or(0.45) as f32,
@@ -163,6 +170,12 @@ impl AlphaPredictive {
             .compute_similarities(input, candidates)
             .map_err(AlphaError::Predictive)?;
         Ok(similarities)
+    }
+
+    pub fn warm_query(&self, input: &str) -> Result<(), AlphaError> {
+        self.predictive
+            .warm_query(input)
+            .map_err(AlphaError::Predictive)
     }
 
     pub fn update_user_preference(&self, committed_text: &str) -> Result<(), AlphaError> {
@@ -317,6 +330,28 @@ pub extern "C" fn alpha_predictive_compute_similarities_ordered(
 
 #[allow(improper_ctypes_definitions)]
 #[unsafe(no_mangle)]
+pub extern "C" fn alpha_predictive_warm_query(
+    predictive: *mut AlphaPredictive,
+    input: *const c_char,
+) -> c_int {
+    unsafe {
+        let predictive = &*predictive;
+        let input = CStr::from_ptr(input)
+            .to_str()
+            .expect("Invalid UTF-8 string");
+
+        match predictive.warm_query(input) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("Error warming query: {:?}", e);
+                -1
+            }
+        }
+    }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
 pub extern "C" fn alpha_predictive_update_user_preference(
     predictive: *mut AlphaPredictive,
     committed_text: *const c_char,
@@ -389,30 +424,8 @@ pub extern "C" fn alpha_predictive_free_similarities_result(
     }
 }
 
-static TRACING_INIT: Once = Once::new();
-
 fn initialize_tracing() {
-    TRACING_INIT.call_once(|| {
-        let subscriber = FmtSubscriber::builder()
-            .with_max_level(default_tracing_level())
-            .with_ansi(false)
-            .finish();
-        let _ = tracing::subscriber::set_global_default(subscriber);
-    });
-}
-
-fn default_tracing_level() -> Level {
-    match std::env::var("ALPHA_INPUT_LOG_LEVEL")
-        .unwrap_or_else(|_| "warn".to_string())
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "error" => Level::ERROR,
-        _ => Level::WARN,
-    }
+    // Intentionally left blank to disable tracing subscriber registration.
 }
 
 fn resolve_optional_path(config_path: &str, raw_path: &str) -> Option<PathBuf> {

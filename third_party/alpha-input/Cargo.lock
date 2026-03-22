@@ -38,7 +38,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "alpha"
+name = "alpha-input"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
@@ -52,6 +52,7 @@ dependencies = [
  "onnxruntime",
  "ort",
  "serde",
+ "serde_json",
  "thiserror 2.0.14",
  "tokenizers",
  "tracing",
@@ -1423,8 +1424,7 @@ dependencies = [
 [[package]]
 name = "ort"
 version = "1.16.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "889dca4c98efa21b1ba54ddb2bde44fd4920d910f492b618351f839d8428d79d"
+source = "git+https://github.com/pykeio/ort?tag=v1.16.3#5746c1ff546b1cfd1d4ba49a1d987dd500b5137f"
 dependencies = [
  "flate2",
  "half",

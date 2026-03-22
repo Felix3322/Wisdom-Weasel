@@ -160,16 +160,38 @@ where
 
         let target = self.get_query_embedding(input)?;
         let preference_scorer = self.preference_scorer();
+        let mut candidate_infos = Vec::with_capacity(candidates.len());
+        let mut semantic_scores = Vec::with_capacity(candidates.len());
 
-        let mut similarities = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let embedding = self.get_candidate_embedding(candidate)?;
             let semantic_score = embedding.cosine_similarity(&target);
-            let preference_score = preference_scorer.score(&embedding.vector, embedding.norm);
-            similarities.push((candidate.clone(), semantic_score + preference_score));
+            semantic_scores.push(semantic_score);
+            candidate_infos.push((candidate.clone(), embedding, semantic_score));
+        }
+
+        let dynamic_preference_factor = preference_scorer.dynamic_weight_factor(&semantic_scores);
+
+        let mut similarities = Vec::with_capacity(candidates.len());
+        for (candidate, embedding, semantic_score) in candidate_infos {
+            let preference_score = preference_scorer.score(
+                &embedding.vector,
+                embedding.norm,
+                dynamic_preference_factor,
+            );
+            similarities.push((candidate, semantic_score + preference_score));
         }
 
         Ok(similarities)
+    }
+
+    pub fn warm_query(&self, input: &str) -> Result<(), PredictiveError> {
+        if input.trim().is_empty() {
+            return Ok(());
+        }
+
+        let _ = self.get_query_embedding(input)?;
+        Ok(())
     }
 
     pub fn update_user_preference(&self, committed_text: &str) -> Result<(), PredictiveError> {

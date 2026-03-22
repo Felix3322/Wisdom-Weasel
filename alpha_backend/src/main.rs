@@ -110,8 +110,7 @@ fn parse_args() -> Result<(String, String), String> {
             }
             "--help" | "-h" => {
                 return Err(
-                    "usage: alpha-rerank-server --config <path> [--bind host:port]"
-                        .to_string(),
+                    "usage: alpha-rerank-server --config <path> [--bind host:port]".to_string(),
                 );
             }
             other => {
@@ -145,7 +144,7 @@ fn handle_rerank(
                 &ErrorResponse {
                     error: format!("invalid json: {err}"),
                 },
-            )
+            );
         }
     };
 
@@ -192,7 +191,7 @@ fn handle_rerank(
                     &ErrorResponse {
                         error: format!("rerank failed: {err}"),
                     },
-                )
+                );
             }
         };
         for (idx, (_, score)) in similarities.into_iter().enumerate() {
@@ -205,7 +204,8 @@ fn handle_rerank(
     let candidate_count = aggregated.len();
     for (idx, _, score) in &mut aggregated {
         if candidate_count > 1 {
-            let order_prior = (candidate_count.saturating_sub(*idx)) as f32 / candidate_count as f32;
+            let order_prior =
+                (candidate_count.saturating_sub(*idx)) as f32 / candidate_count as f32;
             *score += 0.03 * order_prior;
         }
     }
@@ -221,7 +221,10 @@ fn handle_rerank(
 
     let response = RerankResponse {
         ranked_indices: ranked.iter().map(|(idx, _, _)| *idx).collect(),
-        ranked_candidates: ranked.iter().map(|(_, candidate, _)| candidate.clone()).collect(),
+        ranked_candidates: ranked
+            .iter()
+            .map(|(_, candidate, _)| candidate.clone())
+            .collect(),
         scores: ranked.iter().map(|(_, _, score)| *score).collect(),
         latency_ms: started.elapsed().as_secs_f64() * 1000.0,
         branches: branch_contexts
@@ -281,13 +284,14 @@ fn json_response<T: Serialize>(
     status: StatusCode,
     payload: &T,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = serde_json::to_vec(payload).unwrap_or_else(|err| {
-        format!(r#"{{"error":"serialization failed: {err}"}}"#).into_bytes()
-    });
+    let body = serde_json::to_vec(payload)
+        .unwrap_or_else(|err| format!(r#"{{"error":"serialization failed: {err}"}}"#).into_bytes());
     let header = Header::from_bytes(
         b"Content-Type".as_slice(),
         b"application/json; charset=utf-8".as_slice(),
     )
     .expect("valid content-type header");
-    Response::from_data(body).with_status_code(status).with_header(header)
+    Response::from_data(body)
+        .with_status_code(status)
+        .with_header(header)
 }
