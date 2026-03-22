@@ -34,12 +34,27 @@ local M = {}
 
 local DEFAULT_CONTEXT_MAX_CHARS = 96
 local DEFAULT_MAX_CANDIDATES = 8
+local DEFAULT_MAX_NEGATIVE_CANDIDATES = 3
 local DEFAULT_RECENT_TAIL_CHARS = 24
 local DEFAULT_ORDER_PRIOR_WEIGHT = 0.03
 
 local function log_warn(message)
     if log and log.warning then
         log.warning(message)
+    end
+end
+
+local function log_info(message)
+    if log and log.info then
+        log.info(message)
+    elseif log and log.warning then
+        log.warning(message)
+    end
+end
+
+local function emit_log(env, message)
+    if env and env.log_enabled then
+        log_info("[alpha_rerank] " .. message)
     end
 end
 
@@ -143,32 +158,41 @@ local function is_strong_sentence_boundary(ch)
 end
 
 local function get_commit_history_segments(env)
+    local records = {}
     local context = env.engine.context
     local history = context and context.commit_history or nil
-    local segments = {}
     if not history or history:empty() then
-        return segments
+        return records
     end
 
-    local records = history:to_table()
-    if type(records) ~= "table" then
-        return segments
+    local raw_records = history:to_table()
+    if type(raw_records) ~= "table" then
+        return records
     end
 
-    for _, record in ipairs(records) do
+    for _, record in ipairs(raw_records) do
         local text = record and record.text or ""
         text = trim_spaces(text)
         if text ~= "" and text:sub(1, 1) ~= "/" then
-            if #segments == 0 or segments[#segments] ~= text then
-                segments[#segments + 1] = text
-            end
+            records[#records + 1] = text
+        end
+    end
+    return records
+end
+
+local function get_commit_history_deduped_segments(env)
+    local records = get_commit_history_segments(env)
+    local segments = {}
+    for _, text in ipairs(records) do
+        if #segments == 0 or segments[#segments] ~= text then
+            segments[#segments + 1] = text
         end
     end
     return segments
 end
 
 local function get_recent_text_context(env)
-    local segments = get_commit_history_segments(env)
+    local segments = get_commit_history_deduped_segments(env)
     if #segments == 0 then
         return ""
     end
@@ -236,6 +260,83 @@ local function get_recent_text_context(env)
     return text
 end
 
+local function find_sequence_overlap(previous_records, current_records)
+    local max_overlap = math.min(#previous_records, #current_records)
+    for overlap = max_overlap, 0, -1 do
+        local matched = true
+        for i = 1, overlap do
+            if previous_records[#previous_records - overlap + i] ~= current_records[i] then
+                matched = false
+                break
+            end
+        end
+        if matched then
+            return overlap
+        end
+    end
+    return 0
+end
+
+local clear_feedback_session
+local build_feedback_for_commit
+local apply_user_feedback
+local join_candidate_preview
+
+local function sync_user_preference(env)
+    if not env.backend_ready or not env.core or env.preference_sync_disabled then
+        return
+    end
+    if type(env.core.apply_user_feedback) ~= "function" and
+        type(env.core.update_user_preference) ~= "function" then
+        env.preference_sync_disabled = true
+        return
+    end
+
+    local records = get_commit_history_segments(env)
+    if not env.preference_history_snapshot then
+        env.preference_history_snapshot = records
+        return
+    end
+
+    local overlap = find_sequence_overlap(env.preference_history_snapshot, records)
+    local consumed_feedback_session = false
+    for i = overlap + 1, #records do
+        local text = records[i]
+        if text and text ~= "" then
+            local feedback = {
+                positive = text,
+                negatives = {},
+                matched = false,
+            }
+            if not consumed_feedback_session then
+                local derived_feedback = build_feedback_for_commit(env, text)
+                if derived_feedback then
+                    feedback = derived_feedback
+                end
+                consumed_feedback_session = true
+                clear_feedback_session(env)
+            end
+
+            local ok, err = apply_user_feedback(env, feedback.positive, feedback.negatives)
+            if not ok then
+                env.preference_sync_disabled = true
+                log_warn("[alpha_rerank] apply_user_feedback failed: " .. tostring(err or "unknown error"))
+                break
+            end
+            if env.log_enabled then
+                emit_log(env,
+                    string.format(
+                        "user feedback updated: chosen=%s, matched=%s, negatives=%s",
+                        tostring(feedback.positive),
+                        tostring(feedback.matched),
+                        join_candidate_preview(feedback.negatives)))
+            end
+        end
+    end
+
+    env.preference_history_snapshot = records
+end
+
 local function build_rerank_context(context, recent_tail_chars)
     context = trim_spaces(context or "")
     if context == "" then
@@ -252,24 +353,105 @@ local function build_rerank_context(context, recent_tail_chars)
     return clamp_tail_text(table.concat(parts, "\n"), DEFAULT_CONTEXT_MAX_CHARS)
 end
 
-local function make_signature(context, current_input, candidates)
+local function make_signature(rerank_context, candidates)
     return table.concat({
-        context or "",
-        "\30",
-        current_input or "",
+        rerank_context or "",
         "\30",
         table.concat(candidates, "\31"),
     })
 end
 
-local function rerank_candidates(env, context, current_input, candidates)
-    if not env.backend_ready or not env.core then
+join_candidate_preview = function(candidates)
+    local preview = {}
+    for i = 1, #candidates do
+        preview[#preview + 1] = tostring(candidates[i])
+    end
+    return table.concat(preview, " | ")
+end
+
+local function clone_text_array(values)
+    local cloned = {}
+    for i = 1, #values do
+        cloned[i] = values[i]
+    end
+    return cloned
+end
+
+local function remember_feedback_session(env, fixed_first_text, reordered_texts)
+    env.last_feedback_session = {
+        fixed_first = trim_spaces(fixed_first_text or ""),
+        reranked = clone_text_array(reordered_texts or {}),
+    }
+end
+
+clear_feedback_session = function(env)
+    env.last_feedback_session = nil
+end
+
+build_feedback_for_commit = function(env, committed_text)
+    committed_text = trim_spaces(committed_text or "")
+    if committed_text == "" then
         return nil
     end
 
-    local signature = make_signature(context, current_input, candidates)
-    if signature == env.last_signature and env.last_order then
-        return env.last_order
+    local session = env.last_feedback_session
+    if not session then
+        return {
+            positive = committed_text,
+            negatives = {},
+            matched = false,
+        }
+    end
+
+    local reranked = session.reranked or {}
+    local matched_index = nil
+    for i = 1, #reranked do
+        if reranked[i] == committed_text then
+            matched_index = i
+            break
+        end
+    end
+
+    local negatives = {}
+    if matched_index then
+        local negative_count = math.min(matched_index - 1, env.max_negative_candidates)
+        for i = 1, negative_count do
+            negatives[#negatives + 1] = reranked[i]
+        end
+        return {
+            positive = committed_text,
+            negatives = negatives,
+            matched = true,
+        }
+    end
+
+    return {
+        positive = committed_text,
+        negatives = {},
+        matched = session.fixed_first == committed_text,
+    }
+end
+
+apply_user_feedback = function(env, committed_text, negative_candidates)
+    if env.preference_sync_disabled or not env.core then
+        return nil, "preference sync disabled"
+    end
+
+    negative_candidates = negative_candidates or {}
+    if type(env.core.apply_user_feedback) == "function" then
+        return env.core.apply_user_feedback(committed_text, negative_candidates)
+    end
+    if type(env.core.update_user_preference) == "function" then
+        return env.core.update_user_preference(committed_text)
+    end
+
+    env.preference_sync_disabled = true
+    return nil, "no preference feedback api available"
+end
+
+local function rerank_candidates(env, context, current_input, candidates)
+    if not env.backend_ready or not env.core then
+        return nil
     end
 
     local rerank_context = build_rerank_context(context, env.recent_tail_chars)
@@ -278,11 +460,21 @@ local function rerank_candidates(env, context, current_input, candidates)
         return nil
     end
 
+    local signature = make_signature(rerank_context, candidates)
+    if signature == env.last_signature and env.last_order then
+        if env.log_enabled then
+            emit_log(env, "cache hit, reuse previous order")
+        end
+        return env.last_order
+    end
+
+    local started_at = rime_api and rime_api.get_time_ms and rime_api.get_time_ms() or nil
     local scores, err = env.core.compute_similarities(rerank_context, candidates)
     if not scores then
         log_warn("[alpha_rerank] compute_similarities failed: " .. tostring(err or "unknown error"))
         return nil
     end
+    local finished_at = rime_api and rime_api.get_time_ms and rime_api.get_time_ms() or nil
 
     for i = 1, #candidates do
         scores[i] = tonumber(scores[i]) or 0.0
@@ -312,6 +504,16 @@ local function rerank_candidates(env, context, current_input, candidates)
 
     env.last_signature = signature
     env.last_order = order
+    local elapsed_ms = (started_at and finished_at) and (finished_at - started_at) or -1
+    if env.log_enabled then
+        emit_log(env,
+            string.format(
+                "rerank done, input=%s, context_chars=%d, pool=%d, elapsed_ms=%d",
+                tostring(current_input),
+                utf8_len(rerank_context),
+                #candidates,
+                elapsed_ms))
+    end
     return order
 end
 
@@ -321,17 +523,24 @@ function M.init(env)
     if env.enabled == nil then env.enabled = false end
 
     env.max_candidates = config:get_int("alpha_rerank/max_candidates") or DEFAULT_MAX_CANDIDATES
+    env.max_negative_candidates = config:get_int("alpha_rerank/max_negative_candidates") or
+        DEFAULT_MAX_NEGATIVE_CANDIDATES
     env.context_max_chars = config:get_int("alpha_rerank/context_max_chars") or DEFAULT_CONTEXT_MAX_CHARS
     env.recent_tail_chars = config:get_int("alpha_rerank/recent_tail_chars") or DEFAULT_RECENT_TAIL_CHARS
     env.order_prior_weight = config:get_double("alpha_rerank/order_prior_weight") or DEFAULT_ORDER_PRIOR_WEIGHT
     env.prefer_sentence_boundary = config:get_bool("alpha_rerank/prefer_sentence_boundary")
     if env.prefer_sentence_boundary == nil then env.prefer_sentence_boundary = true end
+    env.log_enabled = config:get_bool("alpha_rerank/log_enabled")
+    if env.log_enabled == nil then env.log_enabled = false end
 
     env.tags = load_tags(config)
     env.core = alpha_core
     env.backend_ready = false
     env.last_signature = nil
     env.last_order = nil
+    env.preference_sync_disabled = false
+    env.preference_history_snapshot = get_commit_history_segments(env)
+    env.last_feedback_session = nil
 
     if not env.enabled then
         return
@@ -355,6 +564,17 @@ function M.init(env)
     })
     if ok then
         env.backend_ready = true
+        emit_log(env, "configured successfully")
+        emit_log(env, "config_path=" .. config_path)
+        emit_log(env, "dll_path=" .. (dll_path ~= "" and dll_path or "<auto>"))
+        emit_log(env,
+            string.format(
+                "settings: max_candidates=%d, max_negative_candidates=%d, context_max_chars=%d, recent_tail_chars=%d, order_prior_weight=%.3f",
+                env.max_candidates,
+                env.max_negative_candidates,
+                env.context_max_chars,
+                env.recent_tail_chars,
+                env.order_prior_weight))
     else
         log_warn("[alpha_rerank] configure failed: " .. tostring(err or "unknown error"))
     end
@@ -371,6 +591,8 @@ function M.func(input, env)
         for cand in input:iter() do yield(cand) end
         return
     end
+
+    sync_user_preference(env)
 
     local seg = context.composition and context.composition:back() or nil
     if not seg or not tags_match(seg, env) then
@@ -413,6 +635,16 @@ function M.func(input, env)
     end
 
     local history_context = get_recent_text_context(env)
+    if env.log_enabled then
+        emit_log(env,
+            string.format(
+                "input=%s, fixed_first=%s, history_chars=%d, rerank_pool=%d",
+                tostring(current_input),
+                tostring(fixed_first and fixed_first.text or ""),
+                utf8_len(history_context),
+                #rerank_pool))
+        emit_log(env, "before=" .. join_candidate_preview(rerank_texts))
+    end
     local order = rerank_candidates(env, history_context, current_input, rerank_texts)
     if not order then
         for _, cand in ipairs(all_candidates) do yield(cand) end
@@ -431,6 +663,16 @@ function M.func(input, env)
             yield(cand)
         end
     end
+    local reordered_texts = {}
+    for _, index in ipairs(order) do
+        if rerank_texts[index] then
+            reordered_texts[#reordered_texts + 1] = rerank_texts[index]
+        end
+    end
+    remember_feedback_session(env, fixed_first and fixed_first.text or "", reordered_texts)
+    if env.log_enabled then
+        emit_log(env, "after=" .. join_candidate_preview(reordered_texts))
+    end
 
     for i = 1, #rerank_pool do
         if not used[i] then
@@ -446,6 +688,8 @@ end
 function M.fini(env)
     env.last_signature = nil
     env.last_order = nil
+    env.preference_history_snapshot = nil
+    env.last_feedback_session = nil
 end
 
 return M

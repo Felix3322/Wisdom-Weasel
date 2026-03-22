@@ -3,7 +3,7 @@
 path = "C:/models/alpha/model/model.onnx"
 # tokenizer.json 路径
 tokenizer = "C:/models/alpha/model/tokenizer.json"
-max_input_length = 512
+max_input_length = 64
 inference_hardware = "cpu"
 optimization_level = 3
 
@@ -12,3 +12,22 @@ optimization_level = 3
 path = "C:/models/alpha/embeddings_lmdb"
 map_size_mb = 1024
 read_only = true
+
+[performance]
+query_cache_capacity = 128
+candidate_cache_capacity = 4096
+
+[preference]
+enabled = true
+# 相对路径会按当前 config.toml 所在目录解析
+persistence_path = "user_preference.json"
+blend_weight = 0.12
+negative_weight = 0.06
+session_weight = 0.45
+long_term_weight = 0.55
+session_alpha = 0.25
+long_term_alpha = 0.08
+negative_session_alpha = 0.16
+negative_long_term_alpha = 0.05
+min_long_term_updates = 3
+save_every_updates = 8

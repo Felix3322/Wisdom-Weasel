@@ -80,6 +80,13 @@ using AlphaPredictiveComputeOrderedFn = int(__cdecl*)(
     const char* const*,
     int,
     SimilarityResult**);
+using AlphaPredictiveApplyFeedbackFn = int(__cdecl*)(
+    AlphaPredictiveHandle,
+    const char*,
+    const char* const*,
+    int);
+using AlphaPredictiveUpdatePreferenceFn =
+    int(__cdecl*)(AlphaPredictiveHandle, const char*);
 using AlphaPredictiveFreeResultFn =
     void(__cdecl*)(SimilarityResult*, int);
 
@@ -88,6 +95,8 @@ struct AlphaLibrary {
   AlphaPredictiveNewFn create = nullptr;
   AlphaPredictiveFreeFn destroy = nullptr;
   AlphaPredictiveComputeOrderedFn compute_ordered = nullptr;
+  AlphaPredictiveApplyFeedbackFn apply_feedback = nullptr;
+  AlphaPredictiveUpdatePreferenceFn update_preference = nullptr;
   AlphaPredictiveFreeResultFn free_result = nullptr;
   AlphaPredictiveHandle predictor = nullptr;
   std::wstring module_dir;
@@ -181,6 +190,8 @@ void ResetLibraryUnlocked() {
   g_alpha.create = nullptr;
   g_alpha.destroy = nullptr;
   g_alpha.compute_ordered = nullptr;
+  g_alpha.apply_feedback = nullptr;
+  g_alpha.update_preference = nullptr;
   g_alpha.free_result = nullptr;
   g_alpha.library_path.clear();
 }
@@ -277,6 +288,10 @@ bool LoadAlphaLibraryUnlocked(const std::wstring& library_path,
       GetProcAddress(module, "alpha_predictive_free"));
   auto compute = reinterpret_cast<AlphaPredictiveComputeOrderedFn>(
       GetProcAddress(module, "alpha_predictive_compute_similarities_ordered"));
+  auto apply_feedback = reinterpret_cast<AlphaPredictiveApplyFeedbackFn>(
+      GetProcAddress(module, "alpha_predictive_apply_user_feedback"));
+  auto update_preference = reinterpret_cast<AlphaPredictiveUpdatePreferenceFn>(
+      GetProcAddress(module, "alpha_predictive_update_user_preference"));
   auto free_result = reinterpret_cast<AlphaPredictiveFreeResultFn>(
       GetProcAddress(module, "alpha_predictive_free_similarities_result"));
 
@@ -291,6 +306,8 @@ bool LoadAlphaLibraryUnlocked(const std::wstring& library_path,
   g_alpha.create = create;
   g_alpha.destroy = destroy;
   g_alpha.compute_ordered = compute;
+  g_alpha.apply_feedback = apply_feedback;
+  g_alpha.update_preference = update_preference;
   g_alpha.free_result = free_result;
   g_alpha.library_path = library_path;
   return true;
@@ -415,6 +432,79 @@ int LuaComputeSimilarities(lua_State* L) {
   return 1;
 }
 
+int LuaUpdateUserPreference(lua_State* L) {
+  const std::string committed_text = LuaCheckString(L, 1);
+  if (committed_text.empty()) {
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+
+  std::lock_guard<std::mutex> lock(g_alpha_mutex);
+  if (!g_alpha.predictor) {
+    return PushNilError(L, "alpha_rerank_core is not configured");
+  }
+  if (!g_alpha.update_preference) {
+    return PushNilError(
+        L,
+        "alpha_input.dll does not export alpha_predictive_update_user_preference");
+  }
+
+  const int status =
+      g_alpha.update_preference(g_alpha.predictor, committed_text.c_str());
+  if (status != 0) {
+    return PushNilError(L, "alpha_input update_user_preference failed");
+  }
+
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+int LuaApplyUserFeedback(lua_State* L) {
+  const std::string committed_text = LuaCheckString(L, 1);
+  std::vector<std::string> negative_candidates;
+  if (lua_gettop(L) >= 2 && lua_type(L, 2) == kLuaTypeTable) {
+    negative_candidates = LuaCheckStringArray(L, 2);
+  }
+
+  std::vector<const char*> negative_candidate_ptrs;
+  negative_candidate_ptrs.reserve(negative_candidates.size());
+  for (const auto& candidate : negative_candidates) {
+    negative_candidate_ptrs.push_back(candidate.c_str());
+  }
+
+  std::lock_guard<std::mutex> lock(g_alpha_mutex);
+  if (!g_alpha.predictor) {
+    return PushNilError(L, "alpha_rerank_core is not configured");
+  }
+
+  if (g_alpha.apply_feedback) {
+    const int status = g_alpha.apply_feedback(
+        g_alpha.predictor, committed_text.c_str(),
+        negative_candidate_ptrs.empty() ? nullptr : negative_candidate_ptrs.data(),
+        static_cast<int>(negative_candidate_ptrs.size()));
+    if (status != 0) {
+      return PushNilError(L, "alpha_input apply_user_feedback failed");
+    }
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+
+  if (!g_alpha.update_preference) {
+    return PushNilError(
+        L,
+        "alpha_input.dll does not export alpha_predictive_apply_user_feedback");
+  }
+
+  const int status =
+      g_alpha.update_preference(g_alpha.predictor, committed_text.c_str());
+  if (status != 0) {
+    return PushNilError(L, "alpha_input update_user_preference failed");
+  }
+
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 int LuaVersion(lua_State* L) {
   lua_pushstring(L, "alpha_rerank_core/1");
   return 1;
@@ -425,6 +515,8 @@ const luaL_Reg kModuleFunctions[] = {
     {"reset", LuaReset},
     {"is_ready", LuaIsReady},
     {"compute_similarities", LuaComputeSimilarities},
+    {"apply_user_feedback", LuaApplyUserFeedback},
+    {"update_user_preference", LuaUpdateUserPreference},
     {"version", LuaVersion},
     {nullptr, nullptr},
 };

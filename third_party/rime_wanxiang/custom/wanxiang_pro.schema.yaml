@@ -165,6 +165,7 @@ alpha_rerank:
   context_max_chars: 96
   recent_tail_chars: 24
   order_prior_weight: 0.03
+  log_enabled: false
   prefer_sentence_boundary: true
   tags:
     - abc

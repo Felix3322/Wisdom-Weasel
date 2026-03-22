@@ -3,10 +3,9 @@
 <img width="688" height="97" alt="image" src="https://github.com/user-attachments/assets/d77ae687-9844-4a05-b38b-3e82c6093aab" />
 <img width="655" height="87" alt="image" src="https://github.com/user-attachments/assets/f4bc8f3f-1cc3-436f-9e3e-4054fd643ed3" />
 
-
 在小狼毫（Weasel）基础上，整合三层能力：
 
-1. **万象拼音**：负责词库、语法模型、长句与 Rime 方案层能力
+1. **万象拼音**：负责词库、语法模型、长句能力与 Rime 方案层
 2. **Alpha 重排**：负责有拼音场景下的候选实时排序
 3. **LLM 预测**：负责无拼音预测、多后端推理与上下文联想
 scukeqi/Wisdom-Weasel的绝大部分代码已经被改写
@@ -37,39 +36,48 @@ scukeqi/Wisdom-Weasel的绝大部分代码已经被改写
 
 ---
 
-## 默认内置内容
-
-### Rime 方案
+## 方案与职责
 
 - `wanxiang`
 - `wanxiang_pro`
 
-### Alpha CPU 实时重排默认模型
+三层职责固定为：
 
-- `qwen3-0.6b-onnx-int8`
-- `qwen3-0.6b-embeddings_lmdb`
+- 万象：**方案层 / 长句语法层**
+- Alpha：**候选排序层**
+- LLM：**你自己的预测层**
 
-### LLM 预测后端
-
-- `openai`
-- `llamacpp`
-- `hf_constraint`
+三者不再混用。
 
 ---
 
-## 发行版安装方式
+## Release 资产策略
 
-发行版会附带：
+现在的发行版默认产出三类资产：
 
-- 编译后的 `output/`
-- 万象方案文件
-- Alpha runtime
-- Alpha 模型文件
-- 一键安装脚本
+- `Wisdom-Weasel-installer-<version>.exe`
+- `Wisdom-Weasel-bootstrap-<version>.zip`
+- `Wisdom-Weasel-runtime-<version>.zip`
 
-### 一键安装入口
+不再发布 Alpha 模型大资产。
 
-双击：
+这样做的目的：
+
+- 避免上传超大 Release 文件
+- 不要求你手动上传多段模型包
+- 安装器 EXE 在安装时直接从 **Hugging Face** 下载推荐模型，并在本机转换
+
+---
+
+## 一键安装
+
+推荐直接双击 Release 里的：
+
+```text
+Wisdom-Weasel-installer-<version>.exe
+```
+
+也可以在 bootstrap 包里双击：
 
 ```text
 Install-Wisdom-Weasel.cmd
@@ -81,22 +89,57 @@ Install-Wisdom-Weasel.cmd
 .\scripts\Install-Wisdom-Weasel.ps1
 ```
 
-安装器会：
+安装器 EXE / bootstrap 脚本都会：
 
 1. 让用户选择安装目录  
    - 默认建议：`C:\Program Files\Rime\weasel-0.17.4`
-2. 用发行包中的 `output/` 覆盖目标目录
-3. 复制 Alpha 模型与运行时
-4. 安装万象到用户 Rime 目录
-5. 自动生成并启用 `alpha_rerank` 配置
-6. 重新部署 Rime
-7. 打开 GUI 与用户目录，引导用户继续调整配置
+2. 从 GitHub Release 下载 `runtime` 包
+3. 从 GitHub 仓库下载源码快照
+4. 安装万象到 Rime 用户目录
+5. 安装 Alpha 运行时 DLL
+6. 弹出 Alpha 模型安装方式选择：
+   - **从 HF 下载推荐模型并本地转换**
+   - **选择本地已下载的 HF 模型目录并转换**
+   - **暂时跳过**
+7. 自动写入 `wanxiang.custom.yaml` / `wanxiang_pro.custom.yaml`
+8. 自动部署 Rime
+9. 打开 GUI，引导用户继续勾选方案
+
+---
+
+## Alpha 模型安装方式
+
+推荐模型：
+
+```text
+Qwen/Qwen3-0.6B
+```
+
+安装器在“自动下载并转换”模式下会：
+
+1. 创建临时 Python 虚拟环境
+2. 安装导出依赖
+3. 从 Hugging Face 下载推荐模型
+4. 本地导出：
+   - `alpha_backend/model/qwen3-0.6b-onnx-int8`
+   - `alpha_backend/model/qwen3-0.6b-embeddings_lmdb`
+5. 生成 Rime 使用的 `alpha_rerank_config.toml`
+6. 自动启用 Alpha 重排
+
+说明：自动下载/转换需要本机可用 **Python 3**（安装器会自动创建临时 venv）。
+
+如果你选择“本地模型目录”，安装器会直接用你现有的 HF 模型目录做本地转换，不再重复下载。
+
+如果你选择“跳过”：
+
+- 有现有模型：继续复用
+- 没有现有模型：Alpha 保持关闭，但万象和 LLM 安装不受影响
 
 ---
 
 ## GUI 后续引导
 
-安装完成后，建议用户在 GUI 中完成以下动作：
+安装完成后，建议在 GUI 中完成以下动作：
 
 1. 打开 **小狼毫输入法设定**
 2. 勾选：
@@ -113,12 +156,13 @@ Install-Wisdom-Weasel.cmd
 
 ### Alpha 重排
 
-安装器会自动生成：
+安装器会写入：
 
 ```yaml
 patch:
   alpha_rerank/enabled: true
   alpha_rerank/max_candidates: 6
+  alpha_rerank/max_negative_candidates: 3
   alpha_rerank/context_max_chars: 64
   alpha_rerank/recent_tail_chars: 16
   alpha_rerank/order_prior_weight: 0.02
@@ -128,12 +172,23 @@ patch:
 
 - 第一候选不改
 - 只重排后续候选
+- 根据用户上屏结果累积长期 / 会话偏好向量
+- 用户跳过更高排位候选时，会给这些候选轻量负反馈
 - 自动截断长上下文
-- 适配 CPU 实时场景
+- 面向 CPU 实时场景
+
+偏好相关参数位于：
+
+- `alpha_backend/config.toml`
+- `[preference]` 段
+
+默认会把长期偏好持久化到：
+
+- `alpha_backend/user_preference.json`
 
 ### LLM 无拼音预测
 
-当前本地 Ollama 路径下默认策略：
+当前默认策略：
 
 - 先给一个**短结果**
 - 再补一个**短语**
@@ -160,8 +215,9 @@ $env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildToo
 
 生成结果：
 
-- 发行目录：`archives/Wisdom-Weasel-<version>/`
-- 压缩包：`archives/Wisdom-Weasel-<version>-bundle.7z`
+- `archives/Wisdom-Weasel-installer-<version>.exe`
+- `archives/Wisdom-Weasel-bootstrap-<version>.zip`
+- `archives/Wisdom-Weasel-runtime-<version>.zip`
 
 ---
 
@@ -172,7 +228,7 @@ $env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildToo
 - `scripts/Install-RimeWanxiang.ps1`
   - 单独安装万象到 Rime 用户目录
 - `scripts/Build-ReleaseBundle.ps1`
-  - 组装发行目录并打包
+  - 生成 installer exe + bootstrap zip + runtime zip
 
 ---
 
@@ -183,10 +239,8 @@ $env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildToo
 
 ---
 
-## 备注
+## 致谢
 
-- 万象是**方案层 / 长句语法层**
-- Alpha 是**候选排序层**
-- LLM 是**你自己的预测层**
-
-三者职责分离，不再混用。
+感谢 [scukeqi/Wisdom-Weasel](https://github.com/scukeqi/Wisdom-Weasel) 与
+[fukege/alpha-input](https://github.com/fukege/alpha-input) 提供思路与启发。  
+本项目为独立实现，代码并非来自上述项目。
