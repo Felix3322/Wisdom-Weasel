@@ -70,6 +70,7 @@ if not defined PLATFORM_TOOLSET (
 )
 
 if defined DEVTOOLS_PATH set PATH=%DEVTOOLS_PATH%%PATH%
+set MSBUILD_EXE=
 
 set build_config=Release
 set build_option=/t:Build
@@ -151,18 +152,22 @@ set WEASEL_PROJECT_PROPERTIES=BOOST_ROOT^
   PRODUCT_VERSION^
   FILE_VERSION
 
-cscript.exe render.js weasel.props %WEASEL_PROJECT_PROPERTIES%
+call :render_weasel_props
+if errorlevel 1 goto error_render_props
 
 del msbuild*.log
 
 if defined SDKVER set build_sdk_option=/p:WindowsTargetPlatformVersion=%SDKVER%
 if not defined SDKVER set build_sdk_option=
 
+call :ensure_msbuild
+if errorlevel 1 goto error_msbuild_not_found
+
 if %build_arm64% == 1 (
 
-  msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="ARM" /fl6 %build_sdk_option%
+  "%MSBUILD_EXE%" weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="ARM" /fl6 %build_sdk_option%
   if errorlevel 1 goto error
-  msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="ARM64" /fl5 %build_sdk_option%
+  "%MSBUILD_EXE%" weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="ARM64" /fl5 %build_sdk_option%
   if errorlevel 1 goto error
 )
 
@@ -173,14 +178,14 @@ if %build_x86% == 0 (
 ))
 
 if %build_x64% == 1 (
-  msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="x64" /fl2 %build_sdk_option%
+  "%MSBUILD_EXE%" weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="x64" /fl2 %build_sdk_option%
   if errorlevel 1 goto error
   call :build_alpha_rerank_core x64
   if errorlevel 1 goto error
 )
 
 if %build_x86% == 1 (
-  msbuild.exe weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="Win32" /fl1 %build_sdk_option%
+  "%MSBUILD_EXE%" weasel.sln %build_option% /p:Configuration=%build_config% /p:Platform="Win32" /fl1 %build_sdk_option%
   if errorlevel 1 goto error
   call :build_alpha_rerank_core Win32
   if errorlevel 1 goto error
@@ -208,6 +213,76 @@ if %build_installer% == 1 (
 )
 
 goto end
+
+rem -------------------------------------------------------------------------
+rem find msbuild and render props without relying on WSH/cscript
+:ensure_msbuild
+  if defined MSBUILD_EXE goto end_ensure_msbuild
+  where msbuild.exe >nul 2>&1
+  if not errorlevel 1 (
+    set MSBUILD_EXE=msbuild.exe
+    goto end_ensure_msbuild
+  )
+
+  set VSWHERE_EXE=
+  if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" set "VSWHERE_EXE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+  if not defined VSWHERE_EXE if exist "%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe" set "VSWHERE_EXE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+
+  if defined VSWHERE_EXE (
+    for /f "usebackq delims=" %%i in (`"%VSWHERE_EXE%" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe`) do (
+      if not defined MSBUILD_EXE set MSBUILD_EXE=%%i
+    )
+  )
+
+  if not defined MSBUILD_EXE exit /b 1
+
+  for %%i in ("%MSBUILD_EXE%") do set "MSBUILD_DIR=%%~dpi"
+  if defined MSBUILD_DIR set "PATH=%MSBUILD_DIR%;%PATH%"
+  exit /b 0
+:end_ensure_msbuild
+  exit /b 0
+
+:ensure_msvc_tools
+  set MSVC_TARGET_ARCH=%1
+  if "%MSVC_TARGET_ARCH%" == "" set MSVC_TARGET_ARCH=x64
+  where cl.exe >nul 2>&1
+  if errorlevel 1 goto load_msvc_tools
+  where link.exe >nul 2>&1
+  if errorlevel 1 goto load_msvc_tools
+  exit /b 0
+
+:load_msvc_tools
+  if not defined VSWHERE_EXE (
+    if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" set "VSWHERE_EXE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+    if not defined VSWHERE_EXE if exist "%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe" set "VSWHERE_EXE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
+  )
+
+  set VS_INSTALL_DIR=
+  if defined VSWHERE_EXE (
+    for /f "usebackq delims=" %%i in (`"%VSWHERE_EXE%" -latest -products * -requires Microsoft.Component.MSBuild -property installationPath`) do (
+      if not defined VS_INSTALL_DIR set "VS_INSTALL_DIR=%%i"
+    )
+  )
+
+  if not defined VS_INSTALL_DIR exit /b 1
+  if not exist "%VS_INSTALL_DIR%\Common7\Tools\VsDevCmd.bat" exit /b 1
+
+  call "%VS_INSTALL_DIR%\Common7\Tools\VsDevCmd.bat" -host_arch=x64 -arch=%MSVC_TARGET_ARCH% >nul
+  where cl.exe >nul 2>&1
+  if errorlevel 1 exit /b 1
+  where link.exe >nul 2>&1
+  if errorlevel 1 exit /b 1
+  exit /b 0
+
+:render_weasel_props
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$props = @('BOOST_ROOT','PLATFORM_TOOLSET','VERSION_MAJOR','VERSION_MINOR','VERSION_PATCH','PRODUCT_VERSION','FILE_VERSION');" ^
+    "$template = Get-Content 'weasel.props.template' -Raw -Encoding UTF8;" ^
+    "foreach ($name in $props) { $value = [Environment]::GetEnvironmentVariable($name, 'Process'); $template = $template.Replace('$' + $name, $value) };" ^
+    "Set-Content 'weasel.props' -Value $template -Encoding UTF8;" ^
+    "foreach ($name in $props) { Write-Host ($name + '=' + [Environment]::GetEnvironmentVariable($name, 'Process')) };" ^
+    "Write-Host 'Generated weasel.props'"
+  exit /b %ERRORLEVEL%
 
 rem -------------------------------------------------------------------------
 rem build boost
@@ -262,17 +337,23 @@ rem ---------------------------------------------------------------------------
   set alpha_outdir=
   set alpha_machine=
   set alpha_rime_lib=
+  set alpha_vs_arch=
   if "%alpha_platform%" == "x64" (
     set alpha_outdir=output\lua\wanxiang
     set alpha_machine=/MACHINE:X64
     set alpha_rime_lib=lib64\rime.lib
+    set alpha_vs_arch=x64
   )
   if "%alpha_platform%" == "Win32" (
     set alpha_outdir=output\Win32\lua\wanxiang
     set alpha_machine=/MACHINE:X86
     set alpha_rime_lib=lib\rime.lib
+    set alpha_vs_arch=x86
   )
   if not defined alpha_outdir exit /b 1
+
+  call :ensure_msvc_tools %alpha_vs_arch%
+  if errorlevel 1 goto error
 
   if not exist %alpha_outdir% mkdir %alpha_outdir%
 
@@ -322,6 +403,16 @@ rem ---------------------------------------------------------------------------
 
 cd %WEASEL_ROOT%
 echo error building weasel...
+exit /b 1
+
+:error_msbuild_not_found
+cd %WEASEL_ROOT%
+echo error locating msbuild.exe...
+exit /b 1
+
+:error_render_props
+cd %WEASEL_ROOT%
+echo error rendering weasel.props...
 exit /b 1
 
 :end
