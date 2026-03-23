@@ -47,6 +47,20 @@ patch:
   #  max_candidates: 10
   #  max_iterations: 1
 
+  # 外部长句翻译器：在 script_translator 之后追加一条 Lua translator，
+  # 让「原本翻译器 + 这个模型翻译器」一起出候选，再统一进入 filters 和选字框。
+  # 使用前请先启动你提供的 version_2 服务（默认 http://127.0.0.1:8080/predict）。
+  legacy_http_translator:
+    enabled: false
+    api_url: "http://127.0.0.1:8080/predict"
+    request_timeout_ms: 1200
+    retry_cooldown_ms: 3000
+    min_syllable_count: 5
+    max_candidates: 5
+    initial_quality: 3.35
+    context_max_chars: 80
+    comment: "〔旧译〕"
+
   super_replacer:
     db_name: lua/replacer
     delimiter: "|"
