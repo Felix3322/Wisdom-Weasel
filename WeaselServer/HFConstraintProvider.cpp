@@ -7,6 +7,7 @@
 #include <rime_api.h>
 #include <winhttp.h>
 #include <algorithm>
+#include <cwctype>
 #include <sstream>
 
 #pragma comment(lib, "winhttp.lib")
@@ -62,6 +63,51 @@ std::vector<size_t> ParseSizeArrayField(const boost::property_tree::ptree& root,
     values.push_back(static_cast<size_t>(item.second.get_value<int>()));
   }
   return values;
+}
+
+bool ContainsAsciiAlphaText(const std::wstring& text) {
+  for (wchar_t ch : text) {
+    if ((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ContainsCjkText(const std::wstring& text) {
+  for (wchar_t ch : text) {
+    if ((ch >= 0x3400 && ch <= 0x4DBF) || (ch >= 0x4E00 && ch <= 0x9FFF) ||
+        (ch >= 0xF900 && ch <= 0xFAFF)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::wstring TrimWhitespace(const std::wstring& text) {
+  size_t start = 0;
+  while (start < text.size() && iswspace(text[start])) {
+    ++start;
+  }
+  size_t end = text.size();
+  while (end > start && iswspace(text[end - 1])) {
+    --end;
+  }
+  return text.substr(start, end - start);
+}
+
+std::string NormalizeV2PinyinInput(const std::wstring& current_input) {
+  std::string normalized;
+  normalized.reserve(current_input.size());
+  for (wchar_t ch : current_input) {
+    if (ch >= L'a' && ch <= L'z') {
+      normalized.push_back(static_cast<char>(ch));
+    } else if (ch >= L'A' && ch <= L'Z') {
+      normalized.push_back(
+          static_cast<char>(ch - L'A' + static_cast<wchar_t>('a')));
+    }
+  }
+  return normalized;
 }
 
 }  // namespace
@@ -395,6 +441,294 @@ std::vector<std::wstring> HFConstraintProvider::ParseResponse(
     }
   }
 
+  return candidates;
+}
+
+V2PinyinTranslationProvider::V2PinyinTranslationProvider()
+    : m_enabled(false),
+      m_api_url("http://127.0.0.1:8080/predict"),
+      m_timeout_ms(1200),
+      m_hSession(nullptr),
+      m_hConnect(nullptr) {}
+
+V2PinyinTranslationProvider::~V2PinyinTranslationProvider() {
+  CloseConnection();
+}
+
+void V2PinyinTranslationProvider::CloseConnection() {
+  if (m_hConnect) {
+    WinHttpCloseHandle((HINTERNET)m_hConnect);
+    m_hConnect = nullptr;
+  }
+  if (m_hSession) {
+    WinHttpCloseHandle((HINTERNET)m_hSession);
+    m_hSession = nullptr;
+  }
+  m_cached_url.clear();
+}
+
+bool V2PinyinTranslationProvider::LoadConfig(const std::string& config_name) {
+  extern DevConsole* g_dev_console;
+
+  RimeApi* rime_api = rime_get_api();
+  if (!rime_api) {
+    return false;
+  }
+
+  RimeConfig config = {NULL};
+  if (!rime_api->config_open(config_name.c_str(), &config)) {
+    return false;
+  }
+
+  Bool llm_enabled = false;
+  if (!rime_api->config_get_bool(&config, "llm/enabled", &llm_enabled) ||
+      !llm_enabled) {
+    rime_api->config_close(&config);
+    m_enabled = false;
+    return false;
+  }
+
+  Bool enabled = false;
+  if (!rime_api->config_get_bool(&config, "llm/pinyin_translation/enabled",
+                                 &enabled) ||
+      !enabled) {
+    rime_api->config_close(&config);
+    m_enabled = false;
+    return false;
+  }
+  m_enabled = true;
+
+  const int BUF_SIZE = 512;
+  char buffer[BUF_SIZE + 1] = {0};
+  std::string provider_type = "v2_http";
+  if (rime_api->config_get_string(&config,
+                                  "llm/pinyin_translation/provider_type",
+                                  buffer, BUF_SIZE)) {
+    provider_type = buffer;
+  }
+  if (provider_type != "v2_http" && provider_type != "v2" &&
+      provider_type != "legacy_http") {
+    if (g_dev_console && g_dev_console->IsEnabled()) {
+      g_dev_console->WriteLine(
+          L"[V2 Translator] 不支持的 provider_type = " + u8tow(provider_type));
+    }
+    rime_api->config_close(&config);
+    m_enabled = false;
+    return false;
+  }
+
+  if (rime_api->config_get_string(
+          &config, "llm/pinyin_translation/v2_http/api_url", buffer,
+          BUF_SIZE)) {
+    m_api_url = buffer;
+  } else {
+    m_api_url = "http://127.0.0.1:8080/predict";
+  }
+
+  int timeout_ms = 0;
+  if (rime_api->config_get_int(
+          &config, "llm/pinyin_translation/v2_http/timeout_ms",
+          &timeout_ms) &&
+      timeout_ms > 0) {
+    m_timeout_ms = timeout_ms;
+  } else {
+    m_timeout_ms = 1200;
+  }
+
+  CloseConnection();
+  rime_api->config_close(&config);
+
+  if (g_dev_console && g_dev_console->IsEnabled()) {
+    g_dev_console->WriteLine(L"[V2 Translator] 配置加载成功");
+    g_dev_console->WriteLine(L"  api_url: " + u8tow(m_api_url));
+    g_dev_console->WriteLine(L"  timeout_ms: " +
+                             std::to_wstring(m_timeout_ms));
+  }
+
+  return true;
+}
+
+std::vector<std::wstring> V2PinyinTranslationProvider::ExecuteRequest(
+    const LLMRequest& request,
+    const LLMPartialCallback& on_partial) {
+  std::vector<std::wstring> candidates;
+  if (!IsAvailable() ||
+      request.type != LLMRequestType::PinyinConstrainedPrediction ||
+      request.current_input.empty()) {
+    return candidates;
+  }
+
+  const std::string normalized_pinyin =
+      NormalizeV2PinyinInput(request.current_input);
+  if (normalized_pinyin.empty()) {
+    return candidates;
+  }
+
+  std::wstring context = request.context;
+  if (context.size() > 80) {
+    context = context.substr(context.size() - 80);
+  }
+
+  std::ostringstream json;
+  json << "{"
+       << "\"context\":\"" << EscapeJsonString(wtou8(context)) << "\","
+       << "\"pinyin\":\"" << EscapeJsonString(normalized_pinyin) << "\"";
+  if (request.max_candidates > 0) {
+    json << ",\"max_candidates\":" << request.max_candidates
+         << ",\"beam_width\":" << request.max_candidates;
+  }
+  json
+       << "}";
+
+  std::string response_body;
+  if (!ExecuteHttpRequest(m_api_url, json.str(), response_body)) {
+    return candidates;
+  }
+
+  candidates = ParseResponse(response_body);
+  if (on_partial && !candidates.empty()) {
+    std::vector<std::wstring> first_result;
+    first_result.push_back(candidates.front());
+    if (!on_partial(first_result)) {
+      return first_result;
+    }
+  }
+  if (request.max_candidates > 0 &&
+      candidates.size() > request.max_candidates) {
+    candidates.resize(request.max_candidates);
+  }
+  return candidates;
+}
+
+bool V2PinyinTranslationProvider::IsAvailable() const {
+  return m_enabled && !m_api_url.empty();
+}
+
+bool V2PinyinTranslationProvider::ExecuteHttpRequest(
+    const std::string& url,
+    const std::string& request_body,
+    std::string& response_body) {
+  URL_COMPONENTS url_comp = {0};
+  url_comp.dwStructSize = sizeof(URL_COMPONENTS);
+  url_comp.dwSchemeLength = (DWORD)-1;
+  url_comp.dwHostNameLength = (DWORD)-1;
+  url_comp.dwUrlPathLength = (DWORD)-1;
+  url_comp.dwExtraInfoLength = (DWORD)-1;
+
+  std::wstring url_w = u8tow(url);
+  wchar_t hostname[256] = {0};
+  wchar_t path[1024] = {0};
+  url_comp.lpszHostName = hostname;
+  url_comp.lpszUrlPath = path;
+
+  if (!WinHttpCrackUrl(url_w.c_str(), (DWORD)url_w.length(), 0, &url_comp)) {
+    return false;
+  }
+
+  INTERNET_PORT port = url_comp.nPort;
+  const bool use_https = (url_comp.nScheme == INTERNET_SCHEME_HTTPS);
+  if (port == 0) {
+    port = use_https ? INTERNET_DEFAULT_HTTPS_PORT : INTERNET_DEFAULT_HTTP_PORT;
+  }
+
+  std::wstring hostname_str(hostname, url_comp.dwHostNameLength);
+  std::wstring path_str(path, url_comp.dwUrlPathLength);
+
+  HINTERNET hSession = (HINTERNET)m_hSession;
+  HINTERNET hConnect = (HINTERNET)m_hConnect;
+
+  if (m_cached_url != url || !hSession || !hConnect) {
+    CloseConnection();
+    const bool is_localhost =
+        (hostname_str == L"localhost" || hostname_str == L"127.0.0.1");
+    const DWORD access_type = is_localhost ? WINHTTP_ACCESS_TYPE_NO_PROXY
+                                           : WINHTTP_ACCESS_TYPE_DEFAULT_PROXY;
+    hSession =
+        WinHttpOpen(L"Weasel IME/1.0", access_type,
+                    is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_NAME : NULL,
+                    is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_BYPASS : NULL, 0);
+    if (!hSession) {
+      return false;
+    }
+    WinHttpSetTimeouts(hSession, 5000, 5000, m_timeout_ms, m_timeout_ms);
+    hConnect = WinHttpConnect(hSession, hostname_str.c_str(), port, 0);
+    if (!hConnect) {
+      WinHttpCloseHandle(hSession);
+      return false;
+    }
+    m_hSession = hSession;
+    m_hConnect = hConnect;
+    m_cached_url = url;
+  }
+
+  HINTERNET hRequest = WinHttpOpenRequest(
+      hConnect, L"POST", path_str.c_str(), NULL, WINHTTP_NO_REFERER,
+      WINHTTP_DEFAULT_ACCEPT_TYPES, use_https ? WINHTTP_FLAG_SECURE : 0);
+  if (!hRequest) {
+    CloseConnection();
+    return false;
+  }
+
+  const std::wstring headers = L"Content-Type: application/json\r\n";
+  if (!WinHttpSendRequest(
+          hRequest, headers.c_str(), (DWORD)-1, (LPVOID)request_body.c_str(),
+          (DWORD)request_body.length(), (DWORD)request_body.length(), 0)) {
+    WinHttpCloseHandle(hRequest);
+    CloseConnection();
+    return false;
+  }
+
+  if (!WinHttpReceiveResponse(hRequest, NULL)) {
+    WinHttpCloseHandle(hRequest);
+    CloseConnection();
+    return false;
+  }
+
+  response_body.clear();
+  DWORD bytes_available = 0;
+  while (WinHttpQueryDataAvailable(hRequest, &bytes_available) &&
+         bytes_available > 0) {
+    std::vector<char> buffer(bytes_available);
+    DWORD bytes_read = 0;
+    if (!WinHttpReadData(hRequest, buffer.data(), bytes_available,
+                         &bytes_read)) {
+      WinHttpCloseHandle(hRequest);
+      CloseConnection();
+      return false;
+    }
+    response_body.append(buffer.data(), bytes_read);
+  }
+
+  WinHttpCloseHandle(hRequest);
+  return !response_body.empty();
+}
+
+std::vector<std::wstring> V2PinyinTranslationProvider::ParseResponse(
+    const std::string& json_response) {
+  std::vector<std::wstring> candidates;
+  try {
+    boost::property_tree::ptree root;
+    std::istringstream json_stream(json_response);
+    boost::property_tree::read_json(json_stream, root);
+    const auto child = root.get_child_optional("candidates");
+    if (!child) {
+      return candidates;
+    }
+
+    for (const auto& item : child.get()) {
+      const std::string text_utf8 = item.second.get("text", "");
+      const std::wstring text = TrimWhitespace(u8tow(text_utf8));
+      if (text.empty() || ContainsAsciiAlphaText(text) ||
+          !ContainsCjkText(text) ||
+          std::find(candidates.begin(), candidates.end(), text) !=
+              candidates.end()) {
+        continue;
+      }
+      candidates.push_back(text);
+    }
+  } catch (const boost::property_tree::json_parser_error&) {
+    return {};
+  }
   return candidates;
 }
 

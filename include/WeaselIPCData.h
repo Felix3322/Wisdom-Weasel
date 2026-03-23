@@ -81,6 +81,7 @@ struct CandidateInfo {
     highlighted = 0;
     is_last_page = false;
     candies.clear();
+    comments.clear();
     labels.clear();
   }
   bool empty() const { return candies.empty(); }
@@ -152,6 +153,7 @@ struct Status {
       : type(SCHEMA),
         ascii_mode(false),
         composing(false),
+        async_ui_pending(false),
         disabled(false),
         full_shape(false) {}
   void reset() {
@@ -159,6 +161,7 @@ struct Status {
     schema_id.clear();
     ascii_mode = false;
     composing = false;
+    async_ui_pending = false;
     disabled = false;
     full_shape = false;
     type = SCHEMA;
@@ -166,8 +169,10 @@ struct Status {
   bool operator==(const Status status) {
     return (status.schema_name == schema_name &&
             status.schema_id == schema_id && status.ascii_mode == ascii_mode &&
-            status.composing == composing && status.disabled == disabled &&
-            status.full_shape == full_shape && status.type == type);
+            status.composing == composing &&
+            status.async_ui_pending == async_ui_pending &&
+            status.disabled == disabled && status.full_shape == full_shape &&
+            status.type == type);
   }
   // 輸入方案
   std::wstring schema_name;
@@ -177,6 +182,8 @@ struct Status {
   bool ascii_mode;
   // 寫作狀態
   bool composing;
+  // 后台异步结果仍可能驱动 UI 变化
+  bool async_ui_pending;
   // 維護模式（暫停輸入功能）
   bool disabled;
   // 全角状态

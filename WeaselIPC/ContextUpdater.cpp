@@ -115,6 +115,11 @@ void StatusUpdater::Store(Deserializer::KeyType const& k,
     return;
   }
 
+  if (k[1] == L"async_ui_pending") {
+    m_pTarget->p_status->async_ui_pending = bool_value;
+    return;
+  }
+
   if (k[1] == L"disabled") {
     m_pTarget->p_status->disabled = bool_value;
     return;

@@ -194,6 +194,37 @@ class HFConstraintProvider : public LLMProvider {
   std::string m_cached_url;  // 当前连接对应的 URL，变化时重建连接
 };
 
+// V2 拼音翻译提供者（HTTP）
+// 请求会转换为 {"context":"...","pinyin":"..."}，
+// 响应格式为 {"candidates":[{"text":"..."}, ...]}
+class V2PinyinTranslationProvider : public LLMProvider {
+ public:
+  V2PinyinTranslationProvider();
+  ~V2PinyinTranslationProvider() override;
+  bool LoadConfig(const std::string& config_name) override;
+  std::vector<std::wstring> ExecuteRequest(
+      const LLMRequest& request,
+      const LLMPartialCallback& on_partial = nullptr) override;
+  bool IsAvailable() const override;
+  std::string GetProviderName() const override {
+    return "V2 Pinyin Translation";
+  }
+
+ private:
+  bool ExecuteHttpRequest(const std::string& url,
+                          const std::string& request_body,
+                          std::string& response_body);
+  std::vector<std::wstring> ParseResponse(const std::string& json_response);
+  void CloseConnection();
+
+  bool m_enabled;
+  std::string m_api_url;
+  int m_timeout_ms;
+  void* m_hSession;
+  void* m_hConnect;
+  std::string m_cached_url;
+};
+
 // Alpha 风格实时重排提供者（HTTP）
 // 请求会转换为
 // {"context":"...","current_input":"...","candidates":[...],"top_k":N}

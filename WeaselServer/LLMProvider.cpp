@@ -1144,13 +1144,15 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
       int num_predict;
       size_t max_candidate_chars;
       const wchar_t* stop_chars;
+      bool allow_stream_partial;
+      size_t partial_visible_limit;
     };
 
     const std::vector<OllamaContinuationBranchSpec> branch_specs = {
-        {L"短词", low_temperature, 10, 4, L"\r\n。！？!?；;，,、 "},
-        {L"短语", (low_temperature + high_temperature) / 2.0, 20, 8,
-         L"\r\n。！？!?；;，,、"},
-        {L"长句", high_temperature, 48, 24, L"\r\n。！？!?；;"},
+        {L"首候选", low_temperature, 8, 8, L"\r\n。！？!?；;，,、 ", true, 1},
+        {L"补充短语", (low_temperature + high_temperature) / 2.0, 20, 8,
+         L"\r\n。！？!?；;，,、", false, 2},
+        {L"补充长句", high_temperature, 48, 24, L"\r\n。！？!?；;", false, 3},
     };
 
     auto build_generate_body = [&](double temperature, int num_predict) {
@@ -1182,7 +1184,9 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
         std::wstringstream ss;
         ss << L"  " << branch.label << L": temperature=" << branch.temperature
            << L", num_predict=" << branch.num_predict
-           << L", max_candidate_chars=" << branch.max_candidate_chars;
+           << L", max_candidate_chars=" << branch.max_candidate_chars
+           << L", stream_partial="
+           << (branch.allow_stream_partial ? L"true" : L"false");
         g_dev_console->WriteLine(ss.str());
       }
     }
@@ -1221,8 +1225,16 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
       const std::string branch_body =
           build_generate_body(branch.temperature, branch.num_predict);
       std::string branch_response_body;
+      LLMPartialCallback branch_partial_callback;
+      if (branch.allow_stream_partial && on_partial) {
+        branch_partial_callback =
+            [on_partial](const std::vector<std::wstring>& partial_candidates) {
+              return on_partial(partial_candidates);
+            };
+      }
       if (!ExecuteOllamaGenerateRequest(generate_url, branch_body, prompt_utf8,
-                                        request.max_candidates, nullptr,
+                                        branch.partial_visible_limit,
+                                        branch_partial_callback,
                                         branch_response_body)) {
         continue;
       }
@@ -1235,6 +1247,10 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
           branch.stop_chars));
       if (candidates.size() > candidate_count_before &&
           !publish_candidates()) {
+        break;
+      }
+      if (request.max_candidates > 0 &&
+          candidates.size() >= request.max_candidates) {
         break;
       }
     }

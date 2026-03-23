@@ -16,6 +16,7 @@
 // 前向声明
 class ContextHistory;
 class DevConsole;
+class LLMTaskScheduler;
 
 class ScopedThread {
  public:
@@ -101,7 +102,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
 
  private:
   struct DisplayCandidate {
-    enum class Source { Rime, LLM };
+    enum class Source { Rime, LLM, PendingPlaceholder };
 
     Source source;
     size_t index;
@@ -112,9 +113,13 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
     std::vector<std::wstring> candidates;
     std::vector<std::wstring> rerank_candidates;
     std::vector<size_t> rerank_indices;
+    std::wstring provider_name;
     bool require_rime_candidates;
     bool enable_rime_reorder;
     bool prefer_llm_primary;
+    bool from_no_input;
+    bool input_translation_pending;
+    bool async_ui_pending;
     uint64_t rerank_ui_update_not_before;
   };
 
@@ -129,14 +134,27 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool _Respond(WeaselSessionId ipc_id, EatLine eat);
   void _ReadClientInfo(WeaselSessionId ipc_id, LPWSTR buffer);
   void _GetCandidateInfo(weasel::CandidateInfo& cinfo, RimeContext& ctx);
+  void _GetCandidateInfo(weasel::CandidateInfo& cinfo,
+                         RimeContext& ctx,
+                         const LLMCandidateSnapshot& llm_snapshot);
   void _GetStatus(weasel::Status& stat,
                   WeaselSessionId ipc_id,
                   weasel::Context& ctx);
+  void _GetStatus(weasel::Status& stat,
+                  WeaselSessionId ipc_id,
+                  weasel::Context& ctx,
+                  const LLMCandidateSnapshot& llm_snapshot);
   void _GetContext(weasel::Context& ctx, RimeSessionId session_id);
+  void _GetContext(weasel::Context& ctx,
+                   RimeSessionId session_id,
+                   const LLMCandidateSnapshot& llm_snapshot);
   void _UpdateShowNotifications(RimeConfig* config, bool initialize = false);
   std::wstring _TrimPredictionContext(const std::wstring& context) const;
   LLMCandidateSnapshot _SnapshotLLMCandidates();
   bool _HasLLMDisplayCandidates(const LLMCandidateSnapshot& llm_snapshot) const;
+  bool _HasAsyncUIUpdatePending(const LLMCandidateSnapshot& llm_snapshot) const;
+  void _MarkAsyncUIUpdatePending(uint64_t request_seq);
+  void _ClearAsyncUIUpdatePending(uint64_t request_seq = 0);
   std::vector<DisplayCandidate> _BuildDisplayCandidates(
       const RimeContext* ctx,
       const LLMCandidateSnapshot& llm_snapshot);
@@ -153,9 +171,12 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
                                             RimeSessionId session_id,
                                             DWORD event_time,
                                             bool triggered_by_grave_key);
+  void _ClearLLMResultsForInputChange(bool clear_rerank_results = true);
   void _ClearContextHistory(const std::wstring& reason);
   void _NoteUserActivity();
   void _ArmNoInputPredictionAutoHide(WeaselSessionId ipc_id);
+  void _EnsureLLMTaskScheduler();
+  void _ShutdownLLMTaskScheduler();
 
   bool _IsSessionTSF(RimeSessionId session_id);
   void _UpdateInlinePreeditStatus(WeaselSessionId ipc_id);
@@ -180,6 +201,8 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   std::map<std::string, bool> m_show_notifications;
   std::map<std::string, bool> m_show_notifications_base;
   std::function<void()> _UpdateUICallback;
+  bool m_tsf_exclusive_candidate_window;
+  bool m_log_candidate_window_routing;
 
   static void OnNotify(void* context_object,
                        uintptr_t session_id,
@@ -198,14 +221,18 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   // 上下文历史记录和开发终端
   ContextHistory* m_context_history;
   DevConsole* m_dev_console;
+  std::unique_ptr<LLMTaskScheduler> m_llm_task_scheduler;
 
   // LLM相关（上下文统一从 m_context_history 获取，不再单独维护 buffer）
-  std::unique_ptr<LLMProvider> m_llm_provider;            // 无拼音预测
+  std::unique_ptr<LLMProvider> m_llm_provider;  // 无拼音预测
+  std::unique_ptr<LLMProvider>
+      m_pinyin_translation_provider;  // 有拼音异步翻译补充候选
   std::unique_ptr<LLMProvider> m_pinyin_rerank_provider;  // 有拼音实时重排
   bool m_llm_prediction_mode;
   std::vector<std::wstring> m_current_llm_candidates;
   std::vector<std::wstring> m_current_llm_rerank_candidates;
   std::vector<size_t> m_current_llm_rerank_indices;
+  std::wstring m_current_llm_candidate_provider_name;
   uint64_t m_current_llm_rerank_ui_update_not_before;
   std::wstring m_pending_llm_commit;  // 待提交的LLM候选词
   std::atomic<uint64_t> m_llm_request_seq{
@@ -213,12 +240,16 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   std::atomic<uint64_t> m_llm_user_activity_seq{
       0};  // 用户交互序号（用于无输入预测超时）
   std::atomic<uint64_t> m_llm_no_input_hide_seq{0};  // 无输入预测自动隐藏序号
+  std::atomic<uint64_t> m_llm_async_ui_pending_seq{
+      0};                  // 当前仍可能触发 UI 变化的异步请求序号
   std::mutex m_llm_mutex;  // 保护 m_current_llm_candidates
   bool m_current_llm_candidates_require_rime;
   bool m_current_llm_candidates_enable_rime_reorder;
   bool m_current_llm_candidates_prefer_primary;
   bool m_current_llm_candidates_from_no_input;
+  bool m_current_llm_input_translation_pending;
   bool m_llm_developer_mode;
+  bool m_llm_show_source_labels;
   bool m_llm_enable_pinyin_constraint;
   size_t m_llm_context_recent_words;
   size_t m_llm_context_max_chars;
@@ -234,7 +265,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   static const DWORD GRAVE_DOUBLE_CLICK_TIMEOUT =
       500;  // 双击时间间隔阈值（毫秒）
   static const DWORD LLM_INPUT_IDLE_TRIGGER_MS =
-      1000;  // 有输入时，空闲 1 秒后才触发 LLM 重排/生成
+      200;  // 新增拼音后需静默 200 ms，才触发有拼音 AI
   static const DWORD LLM_NO_INPUT_AUTO_HIDE_MS =
       10000;  // 无输入预测 10 秒无操作后自动隐藏
   static const DWORD LLM_RERANK_SUPPRESS_MS = 800;    // 连续编辑后抑制重排时长

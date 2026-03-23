@@ -117,20 +117,29 @@ STDMETHODIMP CCandidateList::GetCount(UINT* pCandidateCount) {
 }
 
 STDMETHODIMP CCandidateList::GetSelection(UINT* pSelectedCandidateIndex) {
-  *pSelectedCandidateIndex = _ui->ctx().cinfo.highlighted;
+  const auto& cinfo = _ui->ctx().cinfo;
+  if (cinfo.candies.empty()) {
+    *pSelectedCandidateIndex = 0;
+  } else {
+    *pSelectedCandidateIndex =
+        (std::min)(static_cast<UINT>(cinfo.highlighted),
+                   static_cast<UINT>(cinfo.candies.size() - 1));
+  }
   return S_OK;
 }
 
 STDMETHODIMP CCandidateList::GetString(UINT uIndex, BSTR* pbstr) {
   *pbstr = nullptr;
   auto& cinfo = _ui->ctx().cinfo;
-  if (uIndex >= cinfo.candies.size())
-    return E_INVALIDARG;
+  if (uIndex >= cinfo.candies.size()) {
+    *pbstr = SysAllocStringLen(L"", 0);
+    return (*pbstr != nullptr) ? S_OK : E_OUTOFMEMORY;
+  }
 
   auto& str = cinfo.candies[uIndex].str;
-  *pbstr = SysAllocStringLen(str.c_str(), static_cast<UINT>(str.size()) + 1);
+  *pbstr = SysAllocStringLen(str.c_str(), static_cast<UINT>(str.size()));
 
-  return S_OK;
+  return (*pbstr != nullptr) ? S_OK : E_OUTOFMEMORY;
 }
 
 STDMETHODIMP CCandidateList::GetPageIndex(UINT* pIndex,
@@ -160,7 +169,13 @@ STDMETHODIMP CCandidateList::GetCurrentPage(UINT* puPage) {
 }
 
 STDMETHODIMP CCandidateList::SetSelection(UINT nIndex) {
-  _ui->ctx().cinfo.highlighted = nIndex;
+  auto& cinfo = _ui->ctx().cinfo;
+  if (cinfo.candies.empty()) {
+    cinfo.highlighted = 0;
+  } else {
+    cinfo.highlighted =
+        (std::min)(nIndex, static_cast<UINT>(cinfo.candies.size() - 1));
+  }
   return S_OK;
 }
 
@@ -213,14 +228,13 @@ void CCandidateList::UpdateUI(const Context& ctx, const Status& status) {
   /// if it is owned by active view window
   //_UpdateOwner();
   _ui->Update(ctx, status);
-  if (_pbShow == FALSE)
-    _UpdateUIElement();
+  _UpdateUIElement();
   if (status.composing)
     Show(_pbShow);
   else
     Show(FALSE);
 
-  if (status.composing && _pbShow) {
+  if (status.async_ui_pending) {
     _StartAsyncPoll();
   } else {
     _StopAsyncPoll();
@@ -337,7 +351,7 @@ void CCandidateList::EndUI() {
 }
 
 void CCandidateList::_StartAsyncPoll() {
-  if (_asyncPolling || _ui == nullptr || !_ui->IsShown()) {
+  if (_asyncPolling || _ui == nullptr) {
     return;
   }
 
