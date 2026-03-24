@@ -9,11 +9,46 @@
   [string]$ModelSetup = 'prompt',
   [string]$AlphaModelId = 'Qwen/Qwen3-0.6B',
   [string]$LocalModelDir = '',
+  [string]$OllamaModel = '',
+  [ValidateSet('prompt', 'auto')]
+  [string]$OllamaModelSelection = 'prompt',
+  [string]$OllamaBaseUrl = 'http://127.0.0.1:11434',
+  [string]$OllamaInstallScriptUrl = 'https://ollama.com/install.ps1',
+  [string]$OllamaInstallerUrl = 'https://ollama.com/download/OllamaSetup.exe',
+  [switch]$SkipOllamaSetup,
   [switch]$SkipGuiGuide,
   [switch]$SkipDeploy
 )
 
 $ErrorActionPreference = 'Stop'
+
+try {
+  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+}
+
+function Get-PowerShellExecutable {
+  $candidates = @('pwsh.exe', 'pwsh', 'powershell.exe', 'powershell')
+  foreach ($candidate in $candidates) {
+    try {
+      $command = Get-Command $candidate -ErrorAction Stop
+      return $command.Source
+    } catch {
+    }
+  }
+
+  throw '未找到可用的 PowerShell（pwsh / powershell）。'
+}
+
+function Get-OllamaChatCompletionsUrl {
+  param([string]$BaseUrl)
+
+  return ($BaseUrl.TrimEnd('/') + '/v1/chat/completions')
+}
+
+function New-TimestampString {
+  return (Get-Date -Format 'yyyyMMdd-HHmmss')
+}
 
 function Test-IsAdmin {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -42,10 +77,17 @@ function Ensure-Elevated {
   if ($ModelSetup) { $argList += @('-ModelSetup', $ModelSetup) }
   if ($AlphaModelId) { $argList += @('-AlphaModelId', ('"{0}"' -f $AlphaModelId)) }
   if ($LocalModelDir) { $argList += @('-LocalModelDir', ('"{0}"' -f $LocalModelDir)) }
+  if ($OllamaModel) { $argList += @('-OllamaModel', ('"{0}"' -f $OllamaModel)) }
+  if ($OllamaModelSelection) { $argList += @('-OllamaModelSelection', $OllamaModelSelection) }
+  if ($OllamaBaseUrl) { $argList += @('-OllamaBaseUrl', ('"{0}"' -f $OllamaBaseUrl)) }
+  if ($OllamaInstallScriptUrl) { $argList += @('-OllamaInstallScriptUrl', ('"{0}"' -f $OllamaInstallScriptUrl)) }
+  if ($OllamaInstallerUrl) { $argList += @('-OllamaInstallerUrl', ('"{0}"' -f $OllamaInstallerUrl)) }
+  if ($SkipOllamaSetup) { $argList += '-SkipOllamaSetup' }
   if ($SkipGuiGuide) { $argList += '-SkipGuiGuide' }
   if ($SkipDeploy) { $argList += '-SkipDeploy' }
 
-  Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList
+  $shellExe = Get-PowerShellExecutable
+  Start-Process -FilePath $shellExe -Verb RunAs -ArgumentList $argList
   exit
 }
 
@@ -60,6 +102,115 @@ function New-EmptyDir {
     Remove-Item $Path -Recurse -Force
   }
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
+}
+
+function Backup-File {
+  param(
+    [string]$Path,
+    [string]$Label = 'backup'
+  )
+
+  if (!(Test-Path $Path)) {
+    return $null
+  }
+
+  $backupPath = '{0}.{1}.{2}.bak' -f $Path, $Label, (New-TimestampString)
+  Copy-Item -LiteralPath $Path -Destination $backupPath -Force
+  return $backupPath
+}
+
+function Remove-ManagedBlock {
+  param([string]$Content)
+
+  if ([string]::IsNullOrEmpty($Content)) {
+    return ''
+  }
+
+  $pattern = '(?ms)^[ \t]*# >>> Wisdom-Weasel managed Ollama config begin >>>\r?\n.*?^[ \t]*# <<< Wisdom-Weasel managed Ollama config end <<<\r?\n?'
+  return ([regex]::Replace($Content, $pattern, '')).TrimEnd()
+}
+
+function Test-PatchOnlyCustomYaml {
+  param([string]$Content)
+
+  if ([string]::IsNullOrWhiteSpace($Content)) {
+    return $true
+  }
+
+  $hasPatchRoot = $false
+  foreach ($line in ($Content -split "`r?`n")) {
+    $trimmed = $line.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+      continue
+    }
+
+    if ($line -match '^\S') {
+      if ($trimmed -eq 'patch:') {
+        $hasPatchRoot = $true
+        continue
+      }
+      return $false
+    }
+  }
+
+  return $hasPatchRoot
+}
+
+function Get-WeaselManagedOllamaPatchLines {
+  param(
+    [string]$ApiUrl,
+    [string]$ModelName
+  )
+
+  return @(
+    '  # >>> Wisdom-Weasel managed Ollama config begin >>>',
+    '  "llm/enabled": true',
+    '  "llm/provider_type": openai',
+    '  "llm/developer_mode": false',
+    '  "llm/context_recent_words": 20',
+    '  "llm/context_max_chars": 160',
+    '  "llm/input_prediction_debounce_ms": 120',
+    ('  "llm/openai/api_url": "{0}"' -f $ApiUrl),
+    '  "llm/openai/api_key": ""',
+    ('  "llm/openai/model": "{0}"' -f $ModelName),
+    '  "llm/openai/max_tokens": 20',
+    '  "llm/openai/temperature": "0.6"',
+    '  # <<< Wisdom-Weasel managed Ollama config end <<<'
+  )
+}
+
+function Set-WeaselCustomOllamaConfig {
+  param(
+    [string]$Path,
+    [string]$ApiUrl,
+    [string]$ModelName
+  )
+
+  $existingContent = if (Test-Path $Path) {
+    Get-Content -Raw -Path $Path
+  } else {
+    ''
+  }
+  $contentWithoutManagedBlock = Remove-ManagedBlock -Content $existingContent
+  $backupPath = Backup-File -Path $Path -Label 'pre-wisdom-weasel-ollama'
+  $managedLines = Get-WeaselManagedOllamaPatchLines -ApiUrl $ApiUrl -ModelName $ModelName
+
+  if ([string]::IsNullOrWhiteSpace($contentWithoutManagedBlock)) {
+    $newContent = (@('patch:') + $managedLines) -join "`r`n"
+  } elseif (Test-PatchOnlyCustomYaml -Content $contentWithoutManagedBlock) {
+    $newContent = ($contentWithoutManagedBlock.TrimEnd(), ($managedLines -join "`r`n")) -join "`r`n"
+  } else {
+    $newContent = @(
+      '# Wisdom-Weasel installer replaced this file with a managed Ollama config.',
+      '# Restore your previous settings from the backup file created beside this file if needed.',
+      'patch:'
+    ) + $managedLines
+    $newContent = $newContent -join "`r`n"
+  }
+
+  Set-Content -Path $Path -Value ($newContent.TrimEnd() + "`r`n") -Encoding utf8
+
+  return $backupPath
 }
 
 function Select-InstallDirectory {
@@ -94,6 +245,310 @@ function Select-LocalModelDirectory {
   return $dialog.SelectedPath
 }
 
+function Get-DefaultLocalModelDirectory {
+  param([string]$PreferredPath)
+
+  $candidates = @(
+    $PreferredPath,
+    (Join-Path $env:USERPROFILE '.cache\huggingface\hub'),
+    (Join-Path $env:USERPROFILE 'Downloads'),
+    $env:USERPROFILE
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+  foreach ($candidate in $candidates) {
+    if (Test-Path $candidate) {
+      return $candidate
+    }
+  }
+
+  return $PreferredPath
+}
+
+function Get-OllamaModelCatalog {
+  return @(
+    [pscustomobject]@{
+      Model = 'qwen3:0.6b'
+      Label = 'Qwen3 0.6B'
+      Size = '523 MB'
+      Hint = '最稳妥，适合轻薄本 / 低内存 / 纯 CPU'
+    },
+    [pscustomobject]@{
+      Model = 'qwen3:1.7b'
+      Label = 'Qwen3 1.7B'
+      Size = '1.4 GB'
+      Hint = '推荐均衡档，适合大多数日常办公机'
+    },
+    [pscustomobject]@{
+      Model = 'qwen3:4b'
+      Label = 'Qwen3 4B'
+      Size = '2.5 GB'
+      Hint = '更强预测质量，适合 16GB+ 内存或有独显'
+    },
+    [pscustomobject]@{
+      Model = 'qwen3:8b'
+      Label = 'Qwen3 8B'
+      Size = '5.2 GB'
+      Hint = '高质量档，适合高内存 / 6GB+ 显存机器'
+    },
+    [pscustomobject]@{
+      Model = 'qwen3:14b'
+      Label = 'Qwen3 14B'
+      Size = '9.3 GB'
+      Hint = '高性能机器可选，首装耗时和资源占用更高'
+    }
+  )
+}
+
+function Get-SystemHardwareProfile {
+  try {
+    $computer = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+  } catch {
+    $computer = $null
+  }
+
+  try {
+    $processors = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)
+  } catch {
+    $processors = @()
+  }
+
+  try {
+    $videoControllers = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop)
+  } catch {
+    $videoControllers = @()
+  }
+
+  $totalRamBytes = 0
+  if ($computer -and $computer.TotalPhysicalMemory) {
+    [double]$totalRamBytes = $computer.TotalPhysicalMemory
+  }
+  $totalRamGb = [math]::Round($totalRamBytes / 1GB, 1)
+
+  $logicalCores = 0
+  $physicalCores = 0
+  $cpuName = ''
+  if ($processors.Count -gt 0) {
+    $cpuName = ($processors | Select-Object -First 1).Name
+    $logicalCores = ($processors | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum
+    $physicalCores = ($processors | Measure-Object -Property NumberOfCores -Sum).Sum
+  }
+
+  $gpuEntries = @()
+  foreach ($gpu in $videoControllers) {
+    $name = [string]$gpu.Name
+    if ([string]::IsNullOrWhiteSpace($name)) {
+      continue
+    }
+
+    $ramGb = 0
+    if ($gpu.AdapterRAM) {
+      try {
+        $ramGb = [math]::Round(([double]$gpu.AdapterRAM / 1GB), 1)
+      } catch {
+        $ramGb = 0
+      }
+    }
+
+    $gpuEntries += [pscustomobject]@{
+      Name = $name.Trim()
+      RamGb = $ramGb
+    }
+  }
+
+  $maxGpuRamGb = 0
+  if ($gpuEntries.Count -gt 0) {
+    $maxGpuRamGb = ($gpuEntries | Measure-Object -Property RamGb -Maximum).Maximum
+  }
+
+  $hasDedicatedGpu = $false
+  foreach ($gpu in $gpuEntries) {
+    if ($gpu.RamGb -ge 4 -or $gpu.Name -match 'NVIDIA|RTX|GTX|AMD Radeon RX|Arc ') {
+      $hasDedicatedGpu = $true
+      break
+    }
+  }
+
+  return [pscustomobject]@{
+    TotalRamGb = $totalRamGb
+    CpuName = $cpuName
+    LogicalCores = $logicalCores
+    PhysicalCores = $physicalCores
+    Gpus = $gpuEntries
+    MaxGpuRamGb = $maxGpuRamGb
+    HasDedicatedGpu = $hasDedicatedGpu
+  }
+}
+
+function Get-RecommendedOllamaModel {
+  param([pscustomobject]$HardwareProfile)
+
+  if ($HardwareProfile.MaxGpuRamGb -ge 12 -or $HardwareProfile.TotalRamGb -ge 32) {
+    return 'qwen3:14b'
+  }
+  if ($HardwareProfile.MaxGpuRamGb -ge 6 -or $HardwareProfile.TotalRamGb -ge 24) {
+    return 'qwen3:8b'
+  }
+  if ($HardwareProfile.MaxGpuRamGb -ge 4 -or $HardwareProfile.TotalRamGb -ge 16) {
+    return 'qwen3:4b'
+  }
+  if ($HardwareProfile.TotalRamGb -ge 10 -or $HardwareProfile.LogicalCores -ge 8) {
+    return 'qwen3:1.7b'
+  }
+  return 'qwen3:0.6b'
+}
+
+function Get-HardwareSummaryText {
+  param([pscustomobject]$HardwareProfile)
+
+  $gpuText = if ($HardwareProfile.Gpus.Count -gt 0) {
+    ($HardwareProfile.Gpus | ForEach-Object {
+        if ($_.RamGb -gt 0) {
+          '{0} ({1} GB)' -f $_.Name, $_.RamGb
+        } else {
+          $_.Name
+        }
+      }) -join '; '
+  } else {
+    '未识别到显卡信息'
+  }
+
+  return @(
+    ('CPU: ' + ($(if ($HardwareProfile.CpuName) { $HardwareProfile.CpuName } else { '未知 CPU' }))),
+    ('核心/线程: {0}/{1}' -f $HardwareProfile.PhysicalCores, $HardwareProfile.LogicalCores),
+    ('内存: {0} GB' -f $HardwareProfile.TotalRamGb),
+    ('显卡: ' + $gpuText),
+    '说明：Ollama 会在支持的 CPU 上自动使用 AVX/AVX2 等指令集优化，无需额外手动开关。'
+  ) -join "`r`n"
+}
+
+function Select-OllamaModel {
+  param(
+    [pscustomobject]$HardwareProfile,
+    [string]$DefaultModel
+  )
+
+  Add-WinForms
+
+  $catalog = Get-OllamaModelCatalog
+  $recommendedModel = if ([string]::IsNullOrWhiteSpace($DefaultModel)) {
+    Get-RecommendedOllamaModel -HardwareProfile $HardwareProfile
+  } else {
+    $DefaultModel
+  }
+
+  $form = New-Object System.Windows.Forms.Form
+  $form.Text = '选择 Ollama 预测模型'
+  $form.Width = 760
+  $form.Height = 520
+  $form.StartPosition = 'CenterScreen'
+  $form.TopMost = $true
+
+  $summaryLabel = New-Object System.Windows.Forms.Label
+  $summaryLabel.Left = 16
+  $summaryLabel.Top = 16
+  $summaryLabel.Width = 700
+  $summaryLabel.Height = 110
+  $summaryLabel.Text = "已检测硬件：`r`n$(Get-HardwareSummaryText -HardwareProfile $HardwareProfile)"
+  $form.Controls.Add($summaryLabel)
+
+  $recommendLabel = New-Object System.Windows.Forms.Label
+  $recommendLabel.Left = 16
+  $recommendLabel.Top = 132
+  $recommendLabel.Width = 700
+  $recommendLabel.Height = 24
+  $recommendLabel.Text = "推荐模型：$recommendedModel（已按当前机器配置预选）"
+  $form.Controls.Add($recommendLabel)
+
+  $listBox = New-Object System.Windows.Forms.ListBox
+  $listBox.Left = 16
+  $listBox.Top = 164
+  $listBox.Width = 700
+  $listBox.Height = 180
+  foreach ($entry in $catalog) {
+    [void]$listBox.Items.Add(('{0}  |  {1}  |  {2}  |  {3}' -f $entry.Model, $entry.Label, $entry.Size, $entry.Hint))
+  }
+  [void]$listBox.Items.Add('custom  |  自定义  |  手动输入  |  输入任意 Ollama 模型名（例如 llama3.2:3b）')
+  $form.Controls.Add($listBox)
+
+  $customLabel = New-Object System.Windows.Forms.Label
+  $customLabel.Left = 16
+  $customLabel.Top = 356
+  $customLabel.Width = 160
+  $customLabel.Height = 24
+  $customLabel.Text = '自定义模型名：'
+  $form.Controls.Add($customLabel)
+
+  $customText = New-Object System.Windows.Forms.TextBox
+  $customText.Left = 176
+  $customText.Top = 352
+  $customText.Width = 340
+  $customText.Enabled = $false
+  $form.Controls.Add($customText)
+
+  $tipLabel = New-Object System.Windows.Forms.Label
+  $tipLabel.Left = 16
+  $tipLabel.Top = 386
+  $tipLabel.Width = 700
+  $tipLabel.Height = 42
+  $tipLabel.Text = '提示：模型越大，预测质量通常更好，但首次下载更慢、内存/显存占用更高。'
+  $form.Controls.Add($tipLabel)
+
+  $okButton = New-Object System.Windows.Forms.Button
+  $okButton.Text = '确定'
+  $okButton.Left = 520
+  $okButton.Top = 432
+  $okButton.Width = 90
+  $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
+  $form.Controls.Add($okButton)
+
+  $cancelButton = New-Object System.Windows.Forms.Button
+  $cancelButton.Text = '取消'
+  $cancelButton.Left = 626
+  $cancelButton.Top = 432
+  $cancelButton.Width = 90
+  $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+  $form.Controls.Add($cancelButton)
+
+  $form.AcceptButton = $okButton
+  $form.CancelButton = $cancelButton
+
+  $updateCustomState = {
+    $selected = [string]$listBox.SelectedItem
+    $isCustom = $selected.StartsWith('custom ')
+    $customText.Enabled = $isCustom
+    if (-not $isCustom) {
+      $customText.Text = ''
+    }
+  }
+  $listBox.add_SelectedIndexChanged($updateCustomState)
+
+  $recommendedIndex = 0
+  for ($index = 0; $index -lt $catalog.Count; $index++) {
+    if ($catalog[$index].Model -eq $recommendedModel) {
+      $recommendedIndex = $index
+      break
+    }
+  }
+  $listBox.SelectedIndex = $recommendedIndex
+  & $updateCustomState
+
+  $result = $form.ShowDialog()
+  if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+    throw '已取消选择 Ollama 模型。'
+  }
+
+  $selected = [string]$listBox.SelectedItem
+  if ($selected.StartsWith('custom ')) {
+    $customModel = $customText.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($customModel)) {
+      throw '自定义 Ollama 模型名不能为空。'
+    }
+    return $customModel
+  }
+
+  return ($selected -split '\s+\|\s+')[0].Trim()
+}
+
 function Select-ModelSetupMode {
   param([bool]$HasExistingModel)
 
@@ -107,6 +562,7 @@ function Select-ModelSetupMode {
 
   $message = @"
 Alpha 模型不再随 Release 打包，避免上传/下载超大资产。
+自动下载并转换需要本机可用 Python 3，并且安装时可访问 Hugging Face。
 
 是(Y)：从 Hugging Face 下载推荐模型，并在本机转换
 否(N)：选择本地已下载的 Hugging Face 模型目录并转换
@@ -419,6 +875,15 @@ patch:
   alpha_rerank/recent_tail_chars: 16
   alpha_rerank/order_prior_weight: 0.02
   alpha_rerank/log_enabled: false
+  legacy_http_translator/enabled: false
+  legacy_http_translator/api_url: "http://127.0.0.1:8080/predict"
+  legacy_http_translator/request_timeout_ms: 1200
+  legacy_http_translator/retry_cooldown_ms: 3000
+  legacy_http_translator/min_syllable_count: 5
+  legacy_http_translator/max_candidates: 5
+  legacy_http_translator/initial_quality: 3.35
+  legacy_http_translator/context_max_chars: 80
+  legacy_http_translator/comment: "〔旧译〕"
 "@
 
   Set-Content -Path (Join-Path $RimeDir 'wanxiang.custom.yaml') -Value $patch -Encoding utf8
@@ -525,6 +990,175 @@ function Invoke-InlinePython {
     Invoke-NativeCommand -FilePath $PythonPath -Arguments (@($tempScript) + $Arguments)
   } finally {
     Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Find-OllamaExecutable {
+  $candidates = [System.Collections.Generic.List[string]]::new()
+
+  try {
+    $command = Get-Command 'ollama.exe' -ErrorAction Stop
+    [void]$candidates.Add($command.Source)
+  } catch {
+  }
+
+  foreach ($path in @(
+      (Join-Path $env:LOCALAPPDATA 'Programs\Ollama\ollama.exe'),
+      (Join-Path $env:USERPROFILE 'AppData\Local\Programs\Ollama\ollama.exe')
+    )) {
+    if ($path -and (Test-Path $path)) {
+      [void]$candidates.Add($path)
+    }
+  }
+
+  return $candidates | Select-Object -Unique | Select-Object -First 1
+}
+
+function Install-OllamaViaBootstrapScript {
+  param([string]$InstallScriptUrl)
+
+  $bootstrapScript = Join-Path $env:TEMP ("wisdom-weasel-ollama-bootstrap-" + [guid]::NewGuid().ToString('N') + '.ps1')
+  try {
+    Write-Host "==> 下载 Ollama 官方安装脚本: $InstallScriptUrl"
+    Invoke-WebRequest -Uri $InstallScriptUrl -OutFile $bootstrapScript
+    $shellExe = Get-PowerShellExecutable
+    Invoke-NativeCommand -FilePath $shellExe -Arguments @(
+      '-NoProfile',
+      '-ExecutionPolicy', 'Bypass',
+      '-File', $bootstrapScript
+    )
+  } finally {
+    Remove-Item -LiteralPath $bootstrapScript -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Install-OllamaViaInstallerExe {
+  param([string]$InstallerUrl)
+
+  $installerPath = Join-Path $env:TEMP ("wisdom-weasel-ollama-setup-" + [guid]::NewGuid().ToString('N') + '.exe')
+  try {
+    Write-Host "==> 下载 Ollama 安装器: $InstallerUrl"
+    Invoke-WebRequest -Uri $InstallerUrl -OutFile $installerPath
+    Write-Warning '官方 Ollama bootstrap 脚本安装失败，回退到下载并启动 OllamaSetup.exe。'
+    $process = Start-Process -FilePath $installerPath -Wait -PassThru
+    if ($process.ExitCode -ne 0) {
+      throw "OllamaSetup.exe 安装失败，exit=$($process.ExitCode)"
+    }
+  } finally {
+    Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Ensure-OllamaInstalled {
+  param(
+    [string]$InstallScriptUrl,
+    [string]$InstallerUrl
+  )
+
+  $ollamaExe = Find-OllamaExecutable
+  if ($ollamaExe) {
+    return $ollamaExe
+  }
+
+  try {
+    Install-OllamaViaBootstrapScript -InstallScriptUrl $InstallScriptUrl
+  } catch {
+    Write-Warning ("官方 Ollama 安装脚本失败：{0}" -f $_.Exception.Message)
+    Install-OllamaViaInstallerExe -InstallerUrl $InstallerUrl
+  }
+
+  $ollamaExe = Find-OllamaExecutable
+  if (-not $ollamaExe) {
+    throw 'Ollama 安装完成后仍未找到 ollama.exe。'
+  }
+
+  return $ollamaExe
+}
+
+function Test-OllamaApiReady {
+  param([string]$BaseUrl)
+
+  try {
+    $null = Invoke-RestMethod -Uri ($BaseUrl.TrimEnd('/') + '/api/version') -Method Get -TimeoutSec 5
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Wait-OllamaApiReady {
+  param(
+    [string]$BaseUrl,
+    [int]$TimeoutSec = 60
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-OllamaApiReady -BaseUrl $BaseUrl) {
+      return $true
+    }
+    Start-Sleep -Seconds 2
+  }
+  return $false
+}
+
+function Ensure-OllamaApiReady {
+  param(
+    [string]$OllamaExe,
+    [string]$BaseUrl
+  )
+
+  if (Wait-OllamaApiReady -BaseUrl $BaseUrl -TimeoutSec 10) {
+    return
+  }
+
+  Write-Host '==> 启动 Ollama 本地服务'
+  Start-Process -FilePath $OllamaExe -ArgumentList 'serve' -WindowStyle Hidden | Out-Null
+
+  if (-not (Wait-OllamaApiReady -BaseUrl $BaseUrl -TimeoutSec 90)) {
+    throw "Ollama 服务未能在预期时间内启动：$BaseUrl"
+  }
+}
+
+function Test-OllamaModelInstalled {
+  param(
+    [string]$BaseUrl,
+    [string]$ModelName
+  )
+
+  try {
+    $result = Invoke-RestMethod -Uri ($BaseUrl.TrimEnd('/') + '/api/tags') -Method Get -TimeoutSec 10
+    foreach ($model in @($result.models)) {
+      if ($null -eq $model) {
+        continue
+      }
+
+      if ($model.name -eq $ModelName -or $model.model -eq $ModelName) {
+        return $true
+      }
+    }
+  } catch {
+  }
+
+  return $false
+}
+
+function Ensure-OllamaModelInstalled {
+  param(
+    [string]$OllamaExe,
+    [string]$BaseUrl,
+    [string]$ModelName
+  )
+
+  if (Test-OllamaModelInstalled -BaseUrl $BaseUrl -ModelName $ModelName) {
+    return
+  }
+
+  Write-Host "==> 拉取 Ollama 预测模型：$ModelName"
+  Invoke-NativeCommand -FilePath $OllamaExe -Arguments @('pull', $ModelName)
+
+  if (-not (Test-OllamaModelInstalled -BaseUrl $BaseUrl -ModelName $ModelName)) {
+    throw "Ollama 模型拉取后仍不可见：$ModelName"
   }
 }
 
@@ -670,18 +1304,35 @@ function Install-ConvertedAlphaModel {
   Replace-Directory -Source $stagingLayout.LmdbDir -Destination $targetLayout.LmdbDir
 }
 
+function Remove-LegacyAlphaSourceModel {
+  param([string]$ModelRoot)
+
+  $layout = Get-AlphaModelLayout -ModelRoot $ModelRoot
+  if (Test-Path $layout.HfDir) {
+    Write-Host "==> 清理安装目录中的原始 HF 模型缓存: $($layout.HfDir)"
+    Remove-Item -LiteralPath $layout.HfDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Open-GuiGuide {
   param(
     [string]$TargetDir,
     [string]$RimeDir,
     [bool]$AlphaEnabled,
     [string]$ModelStatus,
-    [string]$ReleaseTagValue
+    [string]$ReleaseTagValue,
+    [string]$OllamaStatus,
+    [string]$WeaselCustomBackupPath
   )
 
   Add-WinForms
 
   $alphaStatus = if ($AlphaEnabled) { '已启用' } else { '未启用' }
+  $backupDisplay = if ([string]::IsNullOrWhiteSpace($WeaselCustomBackupPath)) {
+    '本次未生成备份（原文件不存在或为空）'
+  } else {
+    $WeaselCustomBackupPath
+  }
   $message = @"
 Wisdom-Weasel 已安装完成。
 
@@ -694,10 +1345,16 @@ $alphaStatus
 模型状态：
 $ModelStatus
 
+Ollama 预测：
+$OllamaStatus
+
+weasel.custom.yaml 备份：
+$backupDisplay
+
 建议下一步：
 1. 打开“小狼毫输入法设定”
 2. 勾选 wanxiang / wanxiang_pro
-3. 如需修改 LLM，请编辑：
+3. 如需修改 Ollama / LLM，请编辑：
    - $RimeDir\weasel.custom.yaml
    - $RimeDir\wanxiang.custom.yaml
    - $RimeDir\wanxiang_pro.custom.yaml
@@ -727,6 +1384,19 @@ $InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromP
 $RimeUserDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RimeUserDir)
 if ($LocalModelDir) {
   $LocalModelDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LocalModelDir)
+}
+$OllamaBaseUrl = $OllamaBaseUrl.TrimEnd('/')
+
+$hardwareProfile = $null
+if (-not $SkipOllamaSetup) {
+  $hardwareProfile = Get-SystemHardwareProfile
+  if ([string]::IsNullOrWhiteSpace($OllamaModel)) {
+    if ($OllamaModelSelection -eq 'prompt') {
+      $OllamaModel = Select-OllamaModel -HardwareProfile $hardwareProfile -DefaultModel (Get-RecommendedOllamaModel -HardwareProfile $hardwareProfile)
+    } else {
+      $OllamaModel = Get-RecommendedOllamaModel -HardwareProfile $hardwareProfile
+    }
+  }
 }
 
 if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
@@ -791,7 +1461,7 @@ $modelStatus = if ($hadExistingAlphaModel) {
 }
 
 if ($effectiveModelSetup -eq 'local' -and [string]::IsNullOrWhiteSpace($LocalModelDir)) {
-  $LocalModelDir = Select-LocalModelDirectory -DefaultPath $targetModelLayout.HfDir
+  $LocalModelDir = Select-LocalModelDirectory -DefaultPath (Get-DefaultLocalModelDirectory -PreferredPath $targetModelLayout.HfDir)
 }
 
 if ($effectiveModelSetup -ne 'skip') {
@@ -802,9 +1472,10 @@ if ($effectiveModelSetup -ne 'skip') {
     $modelSourceDir = ''
     if ($effectiveModelSetup -eq 'auto') {
       Write-Host "==> 从 Hugging Face 下载推荐 Alpha 模型：$AlphaModelId"
-      Download-HuggingFaceModel -PythonPath $pythonPath -ModelId $AlphaModelId -Destination $targetModelLayout.HfDir
-      $modelSourceDir = $targetModelLayout.HfDir
-      $modelStatus = "已从 Hugging Face 下载并开始转换：$AlphaModelId"
+      $downloadedModelDir = Join-Path $modelWorkDir 'hf-source-model'
+      Download-HuggingFaceModel -PythonPath $pythonPath -ModelId $AlphaModelId -Destination $downloadedModelDir
+      $modelSourceDir = $downloadedModelDir
+      $modelStatus = "已从 Hugging Face 下载到临时目录并开始转换：$AlphaModelId"
     } elseif ($effectiveModelSetup -eq 'local') {
       if (!(Test-Path $LocalModelDir)) {
         throw "本地模型目录不存在：$LocalModelDir"
@@ -814,9 +1485,10 @@ if ($effectiveModelSetup -ne 'skip') {
     }
 
     Install-ConvertedAlphaModel -PythonPath $pythonPath -SourceRoot $sourceRoot -ModelSourceDir $modelSourceDir -TargetModelRoot $targetModelRoot -WorkRoot $modelWorkDir
+    Remove-LegacyAlphaSourceModel -ModelRoot $targetModelRoot
 
     if ($effectiveModelSetup -eq 'auto') {
-      $modelStatus = "Alpha 模型已从 Hugging Face 下载并本地转换完成：$AlphaModelId"
+      $modelStatus = "Alpha 模型已从 Hugging Face 下载到临时目录并本地转换完成，仅保留 ONNX / LMDB：$AlphaModelId"
     } else {
       $modelStatus = "Alpha 模型已由本地目录转换完成：$LocalModelDir"
     }
@@ -847,7 +1519,24 @@ $alphaCfg = $rimeAlphaConfigPath.Replace('\', '/')
 Write-WanxiangPatches -RimeDir $RimeUserDir -AlphaDllPath $alphaDll -AlphaConfigPath $alphaCfg -Enabled $alphaEnabled
 
 $weaselCustomPath = Join-Path $RimeUserDir 'weasel.custom.yaml'
-if (!(Test-Path $weaselCustomPath)) {
+$weaselCustomBackupPath = $null
+$ollamaStatus = '已跳过 Ollama 预测安装。'
+$ollamaChatUrl = Get-OllamaChatCompletionsUrl -BaseUrl $OllamaBaseUrl
+
+if (-not $SkipOllamaSetup) {
+  Write-Host '==> 安装 Ollama 预测运行时'
+  $ollamaExe = Ensure-OllamaInstalled -InstallScriptUrl $OllamaInstallScriptUrl -InstallerUrl $OllamaInstallerUrl
+  Ensure-OllamaApiReady -OllamaExe $ollamaExe -BaseUrl $OllamaBaseUrl
+  Ensure-OllamaModelInstalled -OllamaExe $ollamaExe -BaseUrl $OllamaBaseUrl -ModelName $OllamaModel
+  $weaselCustomBackupPath = Set-WeaselCustomOllamaConfig -Path $weaselCustomPath -ApiUrl $ollamaChatUrl -ModelName $OllamaModel
+
+  $backupSuffix = if ($weaselCustomBackupPath) {
+    "；已备份旧配置：$weaselCustomBackupPath"
+  } else {
+    '；原本不存在 weasel.custom.yaml，本次已自动创建'
+  }
+  $ollamaStatus = "已安装/确认 Ollama，本地 API 就绪，模型已拉取：$OllamaModel$backupSuffix"
+} elseif (!(Test-Path $weaselCustomPath)) {
   Set-Content -Path $weaselCustomPath -Value "patch:`r`n" -Encoding utf8
 }
 
@@ -862,7 +1551,7 @@ if (-not $SkipDeploy) {
 
 Start-Process explorer.exe $RimeUserDir
 if (-not $SkipGuiGuide) {
-  Open-GuiGuide -TargetDir $InstallDir -RimeDir $RimeUserDir -AlphaEnabled $alphaEnabled -ModelStatus $modelStatus -ReleaseTagValue $release.tag_name
+  Open-GuiGuide -TargetDir $InstallDir -RimeDir $RimeUserDir -AlphaEnabled $alphaEnabled -ModelStatus $modelStatus -ReleaseTagValue $release.tag_name -OllamaStatus $ollamaStatus -WeaselCustomBackupPath $weaselCustomBackupPath
 }
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -874,6 +1563,14 @@ Write-Host "Rime 用户目录: $RimeUserDir"
 Write-Host "使用 release: $($release.tag_name)"
 Write-Host "源码来源: $SourceRef"
 Write-Host "Alpha 模型状态: $modelStatus"
+if (-not [string]::IsNullOrWhiteSpace($OllamaModel)) {
+  Write-Host "Ollama 模型: $OllamaModel"
+}
+Write-Host "Ollama 状态: $ollamaStatus"
+Write-Host "weasel.custom.yaml: $weaselCustomPath"
+if ($weaselCustomBackupPath) {
+  Write-Host "weasel.custom.yaml 备份: $weaselCustomBackupPath"
+}
 if ($alphaEnabled) {
   Write-Host "Alpha 配置: $rimeAlphaConfigPath"
 } else {

@@ -83,3 +83,5 @@ hf_backend/logs/
 build_logs/
 llamatest/
 pr7_comments.json
+/deploy-backup-*/
+/tmp-codex-deploy-weasel.ps1
