@@ -867,6 +867,7 @@ function Write-WanxiangPatches {
   $enabledValue = if ($Enabled) { 'true' } else { 'false' }
   $patch = @"
 patch:
+  # Alpha 重排：Rime filter + alpha_input.dll
   alpha_rerank/enabled: $enabledValue
   alpha_rerank/config_path: "$AlphaConfigPath"
   alpha_rerank/dll_path: "$AlphaDllPath"
@@ -874,7 +875,14 @@ patch:
   alpha_rerank/context_max_chars: 64
   alpha_rerank/recent_tail_chars: 16
   alpha_rerank/order_prior_weight: 0.02
+  # 长拼音输入时追加轻量输入覆盖先验，减少短词 / 单字意外上浮
+  alpha_rerank/input_coverage_weight: 0.05
+  # 默认不再用“固定第一候选”的旧 workaround
+  alpha_rerank/preserve_first_min_chars: 0
   alpha_rerank/log_enabled: false
+  # 留空时按 schema 默认路径写日志：%APPDATA%\Rime\alpha_rerank.log
+  alpha_rerank/log_path: ""
+  # 旧 HTTP 译码链路默认关闭，保留配置仅为兼容旧环境
   legacy_http_translator/enabled: false
   legacy_http_translator/api_url: "http://127.0.0.1:8080/predict"
   legacy_http_translator/request_timeout_ms: 1200

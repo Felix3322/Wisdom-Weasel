@@ -142,8 +142,10 @@ alpha_rerank:
   context_max_chars: 96
   recent_tail_chars: 24
   order_prior_weight: 0.03
-  preserve_first_min_chars: 5
+  input_coverage_weight: 0.05
+  preserve_first_min_chars: 0
   log_enabled: false
+  log_path: ""
   prefer_sentence_boundary: true
   tags:
     - abc

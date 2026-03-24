@@ -23,8 +23,8 @@ Wisdom-Weasel 基于小狼毫（Weasel）继续演进，固定拆分为三层能
 ```text
 拼音输入
 -> 万象拼音生成候选
--> Alpha 对候选重排
--> 第一候选固定，后续候选低延迟重排
+-> Alpha filter 对前部候选池实时重排
+-> 长拼音输入时叠加输入覆盖先验，减少短词上浮
 ```
 
 ### 无拼音输入
@@ -283,7 +283,7 @@ Qwen/Qwen3-0.6B
 4. 本地导出 ONNX（int8）
 5. 本地构建 embeddings LMDB
 6. 写入 `alpha_rerank_config.toml`
-7. 自动启用 Alpha 重排
+7. 自动写入当前默认 Alpha filter patch 并启用重排
 
 ### 方式 B：使用本地模型目录并转换
 
@@ -353,7 +353,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Wisdom-Weasel.ps
    - `wanxiang.custom.yaml`
    - `wanxiang_pro.custom.yaml`
 
-如果安装器检测到 Alpha 模型已经可用，会自动写好 Alpha 重排补丁和配置。
+如果安装器检测到 Alpha 模型已经可用，会自动写好当前默认的 Alpha filter patch 和配置。
 
 ---
 
@@ -371,7 +371,8 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-Wisdom-Weasel.ps
 
 可以安装主体，但：
 
-- 自动安装 Alpha 模型需要 Python 3
+- Alpha 模型的**自动下载并转换**需要 Python 3
+- Alpha 模型的**本地目录转换**同样需要 Python 3
 - 如果没有 Python 3，就只能先跳过 Alpha，或先自己准备好转换环境
 
 ### Q3：没有 Python 3，会影响 Ollama 预测吗？
@@ -449,6 +450,7 @@ patch:
 
 ```yaml
 patch:
+  # Alpha 重排：Rime filter + alpha_input.dll
   alpha_rerank/enabled: true
   alpha_rerank/config_path: "<Rime 用户目录>/lua/wanxiang/alpha_rerank_config.toml"
   alpha_rerank/dll_path: "<Rime 用户目录>/lua/wanxiang/alpha_input.dll"
@@ -456,16 +458,34 @@ patch:
   alpha_rerank/context_max_chars: 64
   alpha_rerank/recent_tail_chars: 16
   alpha_rerank/order_prior_weight: 0.02
+  alpha_rerank/input_coverage_weight: 0.05
+  alpha_rerank/preserve_first_min_chars: 0
   alpha_rerank/log_enabled: false
+  alpha_rerank/log_path: ""
 ```
+
+除此之外，未在 patch 中显式写出的其他参数继续使用当前 schema 默认值。当前默认行为里比较关键的几个参数是：
+
+- `alpha_rerank/input_coverage_weight: 0.05`
+  - 对**长拼音输入**增加一个轻量“输入覆盖先验”
+  - 目标是减少短词 / 单字在长输入里意外抢到前面的情况
+- `alpha_rerank/preserve_first_min_chars: 0`
+  - 默认**不再强制固定第一候选**
+  - 如果你想恢复“首候选达到某个长度后保位”的旧 workaround，可以手动把它设成正数
+- `alpha_rerank/prefer_sentence_boundary: true`
+  - 上下文优先按更干净的句子 / 子句边界截断
+- `alpha_rerank/log_path`
+  - 可选；如果开启 `log_enabled: true` 但不手动指定路径，默认写到：
+    - `%APPDATA%\Rime\alpha_rerank.log`
 
 特性：
 
-- 第一候选不改
-- 只重排后续候选
+- 当前为 **Rime filter 架构**
+- 默认允许整个前部候选池参与重排
+- 长拼音输入时会额外考虑“输入覆盖度”，避免短词偷塔
 - 可累积长期 / 会话偏好向量
 - 可对“被跳过的更高排位候选”施加轻量负反馈
-- 自动截断长上下文
+- 自动清洗并截断上下文
 - 面向 CPU 实时场景
 
 偏好相关参数位于：
@@ -489,9 +509,13 @@ patch:
 
 ---
 
-## Alpha 重排场景测试（2026-03-21，当前 Rime 部署配置）
+## Alpha 重排理论场景测试（2026-03-21，保留历史数据）
 
-测试环境：
+下面这组数据**保留原始结果，不删除**。  
+它代表的是当时在**理想上下文 / 离线可控条件**下测到的理论最优表现，可以视为“可实现上限”的历史参考。  
+它**不是**当前版本所有真实 IME 端到端环境下的严格实时 benchmark。
+
+历史测试环境：
 
 - DLL：`AppData/Rime/lua/wanxiang/alpha_input.dll`
 - 配置：`AppData/Rime/lua/wanxiang/alpha_rerank_config.toml`
@@ -499,10 +523,12 @@ patch:
 - 偏好：关闭
 - `order_prior_weight = 0.02`
 
-可以说爆杀微信输入法（下面是微信测试，由于 WX 的排序 DLL 未知，只能手动测试，可能没那么完整，但一样准确）。  
-吃了词库的红利，但这也是微信的不足。
+补充说明：
 
-| 场景上下文 (Context) | 输入 (Pinyin) | 预期结果 | 本 DLL 表现 | 微信输入法表现 |
+- 这张表里的微信输入法结果是**历史手动对比**
+- 由于对方排序 DLL 与内部策略未知，它只适合作为参考，不适合作为严格可复现实验
+
+| 场景上下文 (Context) | 输入 (Pinyin) | 预期结果 | 历史理论结果 | 历史手动对比（微信输入法） |
 | --- | --- | --- | --- | --- |
 | 马上要考试了，我需要开始... | fx | 复习 | 复习 ✅ | 复习 ✅ |
 | 下周要去杭州出差，先把酒店和... | jp | 机票 | 机票 ✅ | 机票 ✅ |
@@ -516,7 +542,17 @@ patch:
 
 ## 从源码构建
 
+请以 `build.bat` 的结果为准。  
+如果 IDE 内的编译结果和 `build.bat` 不一致，以 `build.bat` 为准。
+
 PowerShell 推荐：
+
+```powershell
+$env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64;'
+.\build.bat x64
+```
+
+需要强制全量重编时：
 
 ```powershell
 $env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64;'
@@ -573,6 +609,7 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-ReleaseBundle.ps1 
   - 允许用户选择或自定义 Ollama 模型
   - 自动备份并写入 `weasel.custom.yaml`
   - 自动 / 本地转换 Alpha 模型
+  - 自动写入当前默认 Alpha filter patch 与配置
 - `scripts/Install-Wisdom-Weasel.cmd`
   - 方便双击启动，优先使用 `pwsh`
 - `scripts/Build-ReleaseBundle.ps1`

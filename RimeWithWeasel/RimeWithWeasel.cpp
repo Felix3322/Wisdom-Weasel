@@ -261,7 +261,7 @@ class LLMTaskScheduler {
       }
 
       size_t selected_index = static_cast<size_t>(-1);
-      Clock::time_point selected_ready_at = Clock::time_point::max();
+      Clock::time_point selected_ready_at = (Clock::time_point::max)();
       for (size_t i = 0; i < lane_state.pending.size(); ++i) {
         if (lane_state.pending[i] &&
             lane_state.pending[i]->ready_at < selected_ready_at) {
