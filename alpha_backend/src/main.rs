@@ -7,6 +7,7 @@ use std::time::Instant;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 const RECENT_TAIL_CHARS: usize = 24;
+const ORDER_PRIORITY_WEIGHT: f32 = 0.03;
 
 #[derive(Debug, Deserialize)]
 struct RerankRequest {
@@ -127,22 +128,22 @@ fn handle_rerank(
     predictor: &AlphaPredictive,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut body = String::new();
-    if let Err(err) = request.as_reader().read_to_string(&mut body) {
+    if let Err(_err) = request.as_reader().read_to_string(&mut body) {
         return json_response(
             StatusCode(400),
             &ErrorResponse {
-                error: format!("failed to read request body: {err}"),
+                error: "failed to read request body".to_string(),
             },
         );
     }
 
     let req: RerankRequest = match serde_json::from_str(&body) {
         Ok(req) => req,
-        Err(err) => {
+        Err(_) => {
             return json_response(
                 StatusCode(400),
                 &ErrorResponse {
-                    error: format!("invalid json: {err}"),
+                    error: "invalid request JSON".to_string(),
                 },
             );
         }
@@ -185,11 +186,11 @@ fn handle_rerank(
     for (branch_text, branch_weight) in &branch_contexts {
         let similarities = match predictor.compute_similarities(branch_text, &req.candidates) {
             Ok(similarities) => similarities,
-            Err(err) => {
+            Err(_) => {
                 return json_response(
                     StatusCode(500),
                     &ErrorResponse {
-                        error: format!("rerank failed: {err}"),
+                        error: "rerank computation failed".to_string(),
                     },
                 );
             }
@@ -206,7 +207,7 @@ fn handle_rerank(
         if candidate_count > 1 {
             let order_prior =
                 (candidate_count.saturating_sub(*idx)) as f32 / candidate_count as f32;
-            *score += 0.03 * order_prior;
+            *score += ORDER_PRIORITY_WEIGHT * order_prior;
         }
     }
 
@@ -284,8 +285,10 @@ fn json_response<T: Serialize>(
     status: StatusCode,
     payload: &T,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = serde_json::to_vec(payload)
-        .unwrap_or_else(|err| format!(r#"{{"error":"serialization failed: {err}"}}"#).into_bytes());
+    let body = match serde_json::to_vec(payload) {
+        Ok(v) => v,
+        Err(err) => format!(r#"{{"error":"serialization failed: {err}"}}"#).into_bytes(),
+    };
     let header = Header::from_bytes(
         b"Content-Type".as_slice(),
         b"application/json; charset=utf-8".as_slice(),

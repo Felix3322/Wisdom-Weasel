@@ -122,13 +122,24 @@ bool IsCandidateWrapperChar(wchar_t ch) {
 }
 
 std::wstring NormalizeCandidateToken(std::wstring token) {
-  while (!token.empty() && IsCandidateWrapperChar(token.front())) {
-    token.erase(token.begin());
-  }
-  while (!token.empty() && IsCandidateWrapperChar(token.back())) {
-    token.pop_back();
+  // Strip prefix wrapper chars
+  auto start_it = std::find_if_not(token.begin(), token.end(), IsCandidateWrapperChar);
+  // Strip suffix wrapper chars
+  auto end_it = std::find_if_not(token.rbegin(), token.rend(), IsCandidateWrapperChar).base();
+
+  if (start_it >= end_it) {
+    return std::wstring();
   }
 
+  token.erase(token.begin(), start_it);
+  // Recompute end_it since iterators may be invalidated
+  end_it = std::find_if_not(token.rbegin(), token.rend(), IsCandidateWrapperChar).base();
+  if (end_it <= token.begin()) {
+    return std::wstring();
+  }
+  token.erase(end_it, token.end());
+
+  // Strip leading index prefix like "1." or "1、"
   size_t prefix_digits = 0;
   while (prefix_digits < token.size() && IsDigitWide(token[prefix_digits])) {
     ++prefix_digits;
@@ -141,11 +152,12 @@ std::wstring NormalizeCandidateToken(std::wstring token) {
     }
   }
 
-  while (!token.empty() && IsCandidateWrapperChar(token.front())) {
-    token.erase(token.begin());
-  }
-  while (!token.empty() && IsCandidateWrapperChar(token.back())) {
-    token.pop_back();
+  // Final cleanup strip
+  start_it = std::find_if_not(token.begin(), token.end(), IsCandidateWrapperChar);
+  end_it = std::find_if_not(token.rbegin(), token.rend(), IsCandidateWrapperChar).base();
+  if (start_it < end_it) {
+    token.erase(token.begin(), start_it);
+    token.erase(end_it, token.end());
   }
 
   return token;
@@ -404,9 +416,9 @@ std::vector<std::wstring> BuildContinuationCandidates(
     return candidates;
   }
 
-  const size_t visible_len =
-      (std::min)(continuation.size(), static_cast<size_t>(16));
+  static const size_t kMaxVisibleCandidateLen = 16u;
   static const size_t kPreferredLengths[] = {2, 4, 6, 8, 12, 16};
+  const size_t visible_len = (std::min)(continuation.size(), kMaxVisibleCandidateLen);
   for (size_t preferred_len : kPreferredLengths) {
     if (preferred_len > visible_len) {
       continue;
@@ -476,8 +488,9 @@ std::vector<std::wstring> BuildSentenceContinuationCandidates(
     const std::wstring& prompt,
     const std::wstring& generated,
     size_t max_candidates) {
+  static constexpr size_t kMaxSentenceContinuationLen = 24u;
   return BuildSingleContinuationCandidates(prompt, generated, max_candidates,
-                                           24, L"\r\n。！？!?；;");
+                                           kMaxSentenceContinuationLen, L"\r\n。！？!?；;");
 }
 
 bool LooksLikeLongPinyinInput(const std::wstring& text) {

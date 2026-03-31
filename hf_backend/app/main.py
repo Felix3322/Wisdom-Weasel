@@ -166,7 +166,9 @@ def generate_completions(req: PinYinConstraintGenerateRequest) -> GenerateComple
             pinyin_constraints=req.pinyin_constraints,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"推理失败: {exc}") from exc
+        import logging
+        logging.error("generate_completions failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="推理服务内部错误")
 
     elapsed_ms = round((time.time() - start_time) * 1000.0, 3)
     responses = " ".join(output)
@@ -211,7 +213,9 @@ def chat_completions(req: ChatCompletionRequest) -> ChatCompletionResponse:
             max_new_tokens=req.max_tokens,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"推理失败: {exc}") from exc
+        import logging
+        logging.error("chat_completions failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="推理服务内部错误")
 
     content = " ".join(output)
     return ChatCompletionResponse(

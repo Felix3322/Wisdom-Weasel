@@ -1,5 +1,6 @@
 """配置管理模块"""
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 import torch
@@ -45,17 +46,28 @@ class Config:
     
     def _load_config(self) -> dict:
         """加载配置文件，不存在则使用默认配置"""
-        merged = self.DEFAULT_CONFIG.copy()
+        merged = deepcopy(self.DEFAULT_CONFIG)
         if self.config_path.exists():
             try:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
-                    merged.update(json.load(f))
+                    loaded = json.load(f)
+                    merged = self._deep_merge(merged, loaded)
                 print(f"配置已从 {self.config_path} 加载")
             except Exception as e:
                 print(f"加载配置失败: {e}，使用默认配置")
         else:
             print(f"配置文件不存在: {self.config_path}，使用默认配置")
         return merged
+
+    def _deep_merge(self, base: dict, override: dict) -> dict:
+        """深度合并两个字典，override 优先级高于 base"""
+        result = deepcopy(base)
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = deepcopy(value)
+        return result
     
     def get(self, key: str, default: Any = None) -> Any:
         """获取配置值"""

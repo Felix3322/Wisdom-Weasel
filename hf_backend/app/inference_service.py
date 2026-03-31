@@ -172,11 +172,8 @@ class InferenceService:
         )
 
 if __name__ == "__main__":
-    model_name = r"C:\Users\Ken\Downloads\Qwen3_4B"
-    model_manager = ModelManager(model_name)
-    model_manager.load_model()
-
-    inferServer=InferenceService(model_manager)
-    res=inferServer.base_model_generate("计算机视觉是", pinyin_constraints=['ji','su'])
-    for r in res:
-        print(r)
+    # NOTE: This block is for local debugging only.
+    # In production, the model is loaded via ModelManager in main.py lifespan.
+    import sys
+    sys.path.append(os.path.dirname(__file__))
+    print("inference_service: use main.py to run the server, this block is for debugging only")
