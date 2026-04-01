@@ -858,6 +858,12 @@ OpenAICompatibleProvider::OpenAICompatibleProvider()
     : m_enabled(false),
       m_max_tokens(10),
       m_temperature(0.7),
+      m_top_p(1.0),
+      m_presence_penalty(0.0),
+      m_frequency_penalty(0.0),
+      m_has_seed(false),
+      m_seed(0),
+      m_extra_body_json(""),
       m_hSession(nullptr),
       m_hConnect(nullptr) {}
 
@@ -895,9 +901,13 @@ bool OpenAICompatibleProvider::LoadConfig(const std::string& config_name) {
     m_model = "qwen3:8b";
     m_max_tokens = 10;
     m_temperature = 0.7;
+    m_top_p = 1.0;
+    m_presence_penalty = 0.0;
+    m_frequency_penalty = 0.0;
+    m_has_seed = false;
+    m_seed = 0;
     m_extra_body_json.clear();
     m_extra_headers.clear();
-
     if (g_dev_console && g_dev_console->IsEnabled()) {
       g_dev_console->WriteLine(L"[LLM] LoadConfig: llm/enabled = true");
       g_dev_console->WriteLine(L"[LLM] LoadConfig: api_url = " +
@@ -1117,6 +1127,62 @@ bool OpenAICompatibleProvider::LoadConfig(const std::string& config_name) {
     }
   }
 
+  // 读取可选额外参数（有配置则生效，无配置则使用默认值）
+  if (rime_api->config_get_string(&config, "llm/openai/top_p", temp_str,
+                                  sizeof(temp_str) - 1)) {
+    m_top_p = atof(temp_str);
+  } else {
+    m_top_p = 1.0;
+  }
+
+  if (rime_api->config_get_string(&config, "llm/openai/presence_penalty",
+                                  temp_str, sizeof(temp_str) - 1)) {
+    m_presence_penalty = atof(temp_str);
+  } else {
+    m_presence_penalty = 0.0;
+  }
+
+  if (rime_api->config_get_string(&config, "llm/openai/frequency_penalty",
+                                  temp_str, sizeof(temp_str) - 1)) {
+    m_frequency_penalty = atof(temp_str);
+  } else {
+    m_frequency_penalty = 0.0;
+  }
+
+  int seed = 0;
+  if (rime_api->config_get_int(&config, "llm/openai/seed", &seed)) {
+    m_seed = seed;
+    m_has_seed = true;
+  } else {
+    m_seed = 0;
+    m_has_seed = false;
+  }
+
+  if (g_dev_console && g_dev_console->IsEnabled()) {
+    g_dev_console->WriteLine(L"[LLM] LoadConfig: top_p = " +
+                             std::to_wstring(m_top_p));
+    g_dev_console->WriteLine(L"[LLM] LoadConfig: presence_penalty = " +
+                             std::to_wstring(m_presence_penalty));
+    g_dev_console->WriteLine(L"[LLM] LoadConfig: frequency_penalty = " +
+                             std::to_wstring(m_frequency_penalty));
+    g_dev_console->WriteLine(
+        L"[LLM] LoadConfig: seed = " +
+        std::wstring(m_has_seed ? std::to_wstring(m_seed) : L"(未设置)"));
+  }
+
+  // 任意 JSON 透传（必须是 JSON 对象字符串，如 {"stream":false,"user":"abc"}）
+  if (rime_api->config_get_string(&config, "llm/openai/extra_body_json", buffer,
+                                  BUF_SIZE)) {
+    m_extra_body_json = buffer;
+  } else {
+    m_extra_body_json.clear();
+  }
+  if (g_dev_console && g_dev_console->IsEnabled()) {
+    g_dev_console->WriteLine(
+        L"[LLM] LoadConfig: extra_body_json = " +
+        std::wstring(m_extra_body_json.empty() ? L"(空)" : u8tow(m_extra_body_json)));
+  }
+
   CloseConnection();  // URL 可能变化，下次请求时重建连接
   rime_api->config_close(&config);
 
@@ -1286,6 +1352,9 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
     return candidates;
   }
 
+  // 输出请求内容到开发终端
+  extern DevConsole* g_dev_console;
+
   // 构建JSON请求体
   std::string system_prompt_utf8 = wtou8(prompt.system_prompt);
   std::string user_prompt_utf8 = wtou8(prompt.user_prompt);
@@ -1294,7 +1363,6 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
   std::string escaped_user_prompt =
       weasel::config_json::EscapeJsonString(user_prompt_utf8);
   std::string extra_body_members = StripJsonObjectBraces(m_extra_body_json);
-
   std::ostringstream json;
   json << "{"
        << "\"model\":\"" << weasel::config_json::EscapeJsonString(m_model)
@@ -1327,12 +1395,38 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
   if (!extra_body_members.empty()) {
     json << "," << extra_body_members;
   }
+
+  json << ",\"top_p\":" << m_top_p
+       << ",\"presence_penalty\":" << m_presence_penalty
+       << ",\"frequency_penalty\":" << m_frequency_penalty;
+  if (m_has_seed) {
+    json << ",\"seed\":" << m_seed;
+  }
+
+  // 透传额外 JSON（合并对象内部字段到根对象）
+  if (!m_extra_body_json.empty()) {
+    size_t start = m_extra_body_json.find_first_not_of(" \t\r\n");
+    size_t end = m_extra_body_json.find_last_not_of(" \t\r\n");
+    if (start != std::string::npos && end != std::string::npos &&
+        m_extra_body_json[start] == '{' && m_extra_body_json[end] == '}') {
+      std::string inner =
+          m_extra_body_json.substr(start + 1, end - start - 1);
+      if (!inner.empty()) {
+        json << "," << inner;
+      }
+    } else {
+      if (g_dev_console && g_dev_console->IsEnabled()) {
+        g_dev_console->WriteLine(
+            L"[LLM] extra_body_json 格式无效，需为 JSON 对象字符串，已忽略");
+      }
+    }
+  }
+
   json << "}";
 
   std::string request_body = json.str();
 
-  // 输出请求内容到开发终端
-  extern DevConsole* g_dev_console;
+
   if (g_dev_console && g_dev_console->IsEnabled()) {
     g_dev_console->WriteLine(L"[LLM] 发送请求（OpenAI Compatible）");
     g_dev_console->WriteLine(L"  请求类型: " +

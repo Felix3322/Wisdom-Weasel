@@ -104,10 +104,15 @@ class OpenAICompatibleProvider : public LLMProvider {
   std::string m_model;
   int m_max_tokens;
   double m_temperature;
+  double m_top_p;
+  double m_presence_penalty;
+  double m_frequency_penalty;
+  bool m_has_seed;
+  int m_seed;
   std::string m_extra_body_json;
   std::vector<std::pair<std::string, std::string>> m_extra_headers;
-  void* m_hSession;          // HINTERNET，复用的 WinHTTP 会话
-  void* m_hConnect;          // HINTERNET，复用的连接
+  void* m_hSession;       // HINTERNET，复用的 WinHTTP 会话
+  void* m_hConnect;       // HINTERNET，复用的连接
   std::string m_cached_url;  // 当前连接对应的 URL，变化时重建连接
 };
 
@@ -144,14 +149,21 @@ class LlamaCppProvider : public LLMProvider {
   bool PrepareSystemPrompt(const std::string& system_prompt_utf8);
 
   bool m_enabled;
-  std::string m_model_path;  // 模型文件路径
-  int m_n_ctx;               // 上下文大小
-  int m_n_gpu_layers;        // GPU层数
-  int m_max_tokens;          // 最大生成token数
-  double m_temperature;      // 温度参数
-  int m_n_threads;           // 线程数
-  bool m_instruct_model;     // true=Instruct 使用指令 prompt，false=Base 仅用
-                             // context 补全
+  std::string m_model_path;      // 模型文件路径
+  int m_n_ctx;                    // 上下文大小
+  int m_n_gpu_layers;             // GPU层数
+  int m_max_tokens;               // 最大生成token数
+  double m_temperature;           // 温度参数
+  int m_top_k;                    // Top-K 采样
+  double m_top_p;                 // Top-P (nucleus) 采样
+  double m_repeat_penalty;        // 重复惩罚
+  double m_presence_penalty;      // 出现惩罚
+  double m_frequency_penalty;     // 频率惩罚
+  int m_mirostat;                 // 0=关闭, 1=mirostat v1, 2=mirostat v2
+  double m_min_p;                 // 最小概率过滤
+  double m_typical_p;             // typical sampling
+  int m_n_threads;                // 线程数
+  bool m_instruct_model;          // true=Instruct 使用指令 prompt，false=Base 仅用 context 补全
 
   // llama.cpp 对象（使用前向声明避免包含头文件）
   void* m_model;    // llama_model*

@@ -1,0 +1,14 @@
+{
+  "enabledMcpjsonServers": [
+    "serena",
+    "context7",
+    "playwright",
+    "windows-mcp",
+    "clion",
+    "pycharm",
+    "webstorm",
+    "ida-pro-mcp",
+    "cheatengine-mcp",
+    "x64dbg-mcp"
+  ]
+}
