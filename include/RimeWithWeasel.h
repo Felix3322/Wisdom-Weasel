@@ -96,6 +96,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
 
   // 设置开发终端实例
   void SetDevConsole(DevConsole* dev_console);
+  void SetAIAssistantMenuInvoker(const std::function<void()>& cb);
 
   // 获取上下文历史记录（供LLM使用）
   ContextHistory* GetContextHistory() const { return m_context_history; }
@@ -221,6 +222,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   // 上下文历史记录和开发终端
   ContextHistory* m_context_history;
   DevConsole* m_dev_console;
+  std::function<void()> m_ai_assistant_menu_invoker;
   std::unique_ptr<LLMTaskScheduler> m_llm_task_scheduler;
 
   // LLM相关（上下文统一从 m_context_history 获取，不再单独维护 buffer）
@@ -262,8 +264,11 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
 
   // 双击·键检测（用于清空上下文）
   DWORD m_last_grave_key_time;  // 上次·键按下的时间（毫秒）
+  DWORD m_last_shift_release_time;  // 上次 Shift 松开的时间（毫秒）
   static const DWORD GRAVE_DOUBLE_CLICK_TIMEOUT =
       500;  // 双击时间间隔阈值（毫秒）
+  static const DWORD SHIFT_DOUBLE_CLICK_TIMEOUT =
+      400;  // 双击 Shift 弹出 AI 菜单的时间阈值（毫秒）
   static const DWORD LLM_INPUT_IDLE_TRIGGER_MS =
       200;  // 新增拼音后需静默 200 ms，才触发有拼音 AI
   static const DWORD LLM_NO_INPUT_AUTO_HIDE_MS =

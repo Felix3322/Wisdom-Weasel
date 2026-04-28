@@ -409,7 +409,8 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
       m_consecutive_edit_key_count(0),
       m_has_display_highlight_override(false),
       m_display_highlight_override(0),
-      m_last_grave_key_time(0) {
+      m_last_grave_key_time(0),
+      m_last_shift_release_time(0) {
   rime_api = rime_get_api();
   assert(rime_api);
   m_pid = GetCurrentProcessId();
@@ -824,6 +825,10 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
   }
   const DWORD event_time = GetTickCount();
   const bool is_key_press = !(keyEvent.mask & ibus::Modifier::RELEASE_MASK);
+  const bool is_shift_key =
+      keyEvent.keycode == ibus::Keycode::Shift_L ||
+      keyEvent.keycode == ibus::Keycode::Shift_R;
+  const bool is_shift_release = is_shift_key && !is_key_press;
   const bool is_destructive_edit_key =
       is_key_press && (keyEvent.keycode == ibus::Keycode::BackSpace ||
                        keyEvent.keycode == ibus::Keycode::Delete);
@@ -845,6 +850,32 @@ BOOL RimeWithWeaselHandler::ProcessKeyEvent(KeyEvent keyEvent,
       is_key_press && ((keyEvent.keycode >= '0' && keyEvent.keycode <= '9') ||
                        (keyEvent.keycode >= ibus::Keycode::KP_0 &&
                         keyEvent.keycode <= ibus::Keycode::KP_9));
+
+  if (is_shift_release) {
+    const bool has_blocking_modifier =
+        (keyEvent.mask &
+         (ibus::Modifier::CONTROL_MASK | ibus::Modifier::ALT_MASK)) != 0;
+    if (!has_blocking_modifier && m_ai_assistant_menu_invoker) {
+      const bool is_double_click =
+          m_last_shift_release_time > 0 &&
+          (event_time - m_last_shift_release_time) <=
+              SHIFT_DOUBLE_CLICK_TIMEOUT;
+      m_last_shift_release_time = is_double_click ? 0 : event_time;
+      if (is_double_click) {
+        if (m_dev_console && m_dev_console->IsEnabled()) {
+          m_dev_console->WriteLine(
+              L"[AI] 检测到双击 Shift，准备弹出 AI 菜单");
+        }
+        m_ai_assistant_menu_invoker();
+        return TRUE;
+      }
+    } else {
+      m_last_shift_release_time = 0;
+    }
+  } else if (is_key_press && !is_shift_key) {
+    m_last_shift_release_time = 0;
+  }
+
   bool has_active_no_input_prediction = false;
   {
     std::lock_guard<std::mutex> lock(m_llm_mutex);
@@ -3362,6 +3393,11 @@ void RimeWithWeaselHandler::SetDevConsole(DevConsole* dev_console) {
         std::wstring(L"[UI] 候选窗路由日志: ") +
         (m_log_candidate_window_routing ? L"开启" : L"关闭"));
   }
+}
+
+void RimeWithWeaselHandler::SetAIAssistantMenuInvoker(
+    const std::function<void()>& cb) {
+  m_ai_assistant_menu_invoker = cb;
 }
 
 void RimeWithWeaselHandler::_TriggerLLMPrediction(

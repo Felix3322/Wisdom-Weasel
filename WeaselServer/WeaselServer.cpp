@@ -3,6 +3,7 @@
 //	WTL MessageLoop 封装了消息循环. 实现了 getmessage/dispatchmessage....
 
 #include "stdafx.h"
+#include "AIAssistantStandalone.h"
 #include "resource.h"
 #include "WeaselService.h"
 #include <WeaselIPC.h>
@@ -86,6 +87,10 @@ int WINAPI _tWinMain(HINSTANCE hInstance,
   if (!wcscmp(L"/weaseldir", lpstrCmdLine)) {
     WeaselServerApp::explore(WeaselServerApp::install_dir());
     return 0;
+  }
+  if (IsAIAssistantStandaloneCommandLine(lpstrCmdLine)) {
+    return RunStandaloneAIAssistant(
+        ParseAIAssistantStandaloneMode(lpstrCmdLine));
   }
   if (!wcscmp(L"/ascii", lpstrCmdLine) || !wcscmp(L"/nascii", lpstrCmdLine)) {
     weasel::Client client;
