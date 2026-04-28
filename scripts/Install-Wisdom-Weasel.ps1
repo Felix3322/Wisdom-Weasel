@@ -856,6 +856,21 @@ function Sync-AlphaRuntimeToRime {
   }
 }
 
+function Sync-AlphaModelToRime {
+  param(
+    [string]$ModelRoot,
+    [string]$RimeDir
+  )
+
+  if (!(Test-Path $ModelRoot)) {
+    return
+  }
+
+  $targetRoot = Join-Path $RimeDir 'lua\wanxiang\alpha_model'
+  New-Item -ItemType Directory -Force -Path $targetRoot | Out-Null
+  Copy-DirectoryContents -Source $ModelRoot -Destination $targetRoot
+}
+
 function Write-WanxiangPatches {
   param(
     [string]$RimeDir,
@@ -877,10 +892,21 @@ patch:
   alpha_rerank/order_prior_weight: 0.02
   # 长拼音输入时追加轻量输入覆盖先验，减少短词 / 单字意外上浮
   alpha_rerank/input_coverage_weight: 0.05
+  alpha_rerank/base_frequency_weight: 0.18
+  # 门控融合：内容词更偏 semantic，中性词 / 短词保留更强基础词频与用户词频先验
+  alpha_rerank/gate_semantic_weight: 0.34
+  alpha_rerank/gate_preference_weight: 0.08
+  alpha_rerank/gate_quality_weight: 0.12
+  alpha_rerank/gate_user_frequency_weight: 0.16
+  alpha_rerank/gate_continuation_weight: 0.30
+  alpha_rerank/user_frequency_short_candidate_boost: 0.08
+  alpha_rerank/user_frequency_function_word_boost: 0.05
+  alpha_rerank/function_word_continuation_boost: 0.22
+  alpha_rerank/function_word_semantic_penalty: 0.12
   # 默认不再用“固定第一候选”的旧 workaround
   alpha_rerank/preserve_first_min_chars: 0
-  alpha_rerank/log_enabled: false
-  # 留空时按 schema 默认路径写日志：%APPDATA%\Rime\alpha_rerank.log
+  alpha_rerank/log_enabled: true
+  # 留空时优先跟随 WeaselServer 内部审计日志路径；未桥接时回退到 %APPDATA%\Rime\alpha_rerank.log
   alpha_rerank/log_path: ""
   # 旧 HTTP 译码链路默认关闭，保留配置仅为兼容旧环境
   legacy_http_translator/enabled: false
@@ -922,6 +948,44 @@ optimization_level = 3
 path = "$lmdbPath"
 map_size_mb = 1024
 read_only = true
+
+[performance]
+query_cache_capacity = 128
+candidate_cache_capacity = 4096
+
+[semantic_refinement]
+enabled = true
+encoder_candidate_blend_weight = 0.45
+ambiguity_margin_threshold = 0.03
+max_refine_candidates = 3
+
+[preference]
+enabled = true
+persistence_path = "user_preference.json"
+blend_weight = 0.08
+negative_weight = 0.04
+dynamic_min_factor = 0.2
+dynamic_max_factor = 1.0
+dynamic_softmax_temperature = 0.025
+session_weight = 0.45
+long_term_weight = 0.55
+session_alpha = 0.25
+long_term_alpha = 0.08
+negative_session_alpha = 0.16
+negative_long_term_alpha = 0.05
+min_long_term_updates = 3
+save_every_updates = 8
+
+[user_frequency]
+enabled = true
+persistence_path = "user_frequency.json"
+session_weight = 0.4
+long_term_weight = 0.6
+session_decay = 0.06
+long_term_decay = 0.01
+min_count_threshold = 0.0
+saturation = 2.6
+save_every_updates = 4
 "@
 
   $parent = Split-Path -Parent $ConfigPath
@@ -1519,7 +1583,8 @@ $alphaEnabled = Test-AlphaModelInstalled -ModelRoot $targetModelRoot
 $rimeAlphaDir = Join-Path $RimeUserDir 'lua\wanxiang'
 $rimeAlphaConfigPath = Join-Path $rimeAlphaDir 'alpha_rerank_config.toml'
 if ($alphaEnabled) {
-  Write-AlphaConfig -ConfigPath $rimeAlphaConfigPath -ModelRoot $targetModelRoot
+  Sync-AlphaModelToRime -ModelRoot $targetModelRoot -RimeDir $RimeUserDir
+  Write-AlphaConfig -ConfigPath $rimeAlphaConfigPath -ModelRoot (Join-Path $rimeAlphaDir 'alpha_model')
 }
 
 $alphaDll = (Join-Path $rimeAlphaDir 'alpha_input.dll').Replace('\', '/')
