@@ -57,10 +57,43 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
     for General<T>
 {
     type Error = GeneralError;
-    #[instrument(skip(self), fields(input_text = input))]
-    fn get_predict_vector(&self, input: &str) -> Result<Array2<T>, Self::Error> {
+    #[instrument(skip(self, inputs), fields(batch_size = inputs.len()))]
+    fn get_predict_vectors(&self, inputs: &[&str]) -> Result<Array2<T>, Self::Error> {
+        debug!("Getting prediction vectors for {} inputs.", inputs.len());
+        if inputs.is_empty() {
+            return Err(GeneralError::EmptySequence);
+        }
+
+        let mut pooled_rows = Vec::new();
+        let mut hidden_size = 0usize;
+        for input in inputs {
+            let single = self.get_predict_vector_single(input)?;
+            if hidden_size == 0 {
+                hidden_size = single.shape()[1];
+            }
+            pooled_rows.extend(single.into_raw_vec());
+        }
+
+        let batch_size = inputs.len();
+        let mean_pooled_vec = Array2::from_shape_vec((batch_size, hidden_size), pooled_rows)
+            .map_err(|e| GeneralError::Reshape(e.to_string()))?;
+        debug!(
+            "Extracted mean pooled vectors for {} inputs. Shape: {:?}",
+            batch_size,
+            mean_pooled_vec.shape()
+        );
+
+        Ok(mean_pooled_vec)
+    }
+
+    fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+}
+
+impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> General<T> {
+    fn get_predict_vector_single(&self, input: &str) -> Result<Array2<T>, GeneralError> {
         debug!("Getting prediction vector for input: '{}'", input);
-        // Prepare input
         let encoding = self.tokenizer.encode(input, true).map_err(|e| {
             debug!("Tokenization error for input '{}': {}", input, e);
             GeneralError::Tokenization(e.to_string())
@@ -109,16 +142,13 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
             attention_mask.resize(self.max_input_length, 0);
         }
 
-        let input_ids_len = input_ids.len();
-        let attention_mask_len = attention_mask.len();
-
         let input_ids_array = CowArray::from(
-            Array::from_shape_vec((1, input_ids_len), input_ids)
+            Array::from_shape_vec((1, self.max_input_length), input_ids)
                 .map_err(|e| GeneralError::ArrayCreation(e.to_string()))?
                 .into_dyn(),
         );
         let attention_mask_array = CowArray::from(
-            Array::from_shape_vec((1, attention_mask_len), attention_mask)
+            Array::from_shape_vec((1, self.max_input_length), attention_mask)
                 .map_err(|e| GeneralError::ArrayCreation(e.to_string()))?
                 .into_dyn(),
         );
@@ -130,7 +160,6 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
         ];
         debug!("Input tensors created.");
 
-        // Run inference and obtain a view of the output tensor without copying.
         debug!("Running ONNX inference...");
         let outputs = self.session.run(inputs).map_err(GeneralError::Inference)?;
         debug!("Inference completed.");
@@ -143,7 +172,6 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
             last_hidden_state_view.shape()
         );
 
-        // The shape is typically (batch_size, sequence_length, hidden_size).
         let shape = last_hidden_state_view.shape();
         debug!("Output tensor shape: {:?}", shape);
         if shape.len() != 3 || shape[0] == 0 || shape[2] == 0 {
@@ -180,12 +208,6 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
         Ok(mean_pooled_vec)
     }
 
-    fn tokenizer(&self) -> &Tokenizer {
-        &self.tokenizer
-    }
-}
-
-impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> General<T> {
     #[instrument(skip_all, fields(model_path = model_path, tokenizer_path = tokenizer_path))]
     pub fn new(
         model_path: &str,
