@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "AuditLogger.h"
 #include "LLMProvider.h"
 #include "DevConsole.h"
 #include <WeaselUtility.h>
@@ -472,11 +473,14 @@ bool V2PinyinTranslationProvider::LoadConfig(const std::string& config_name) {
 
   RimeApi* rime_api = rime_get_api();
   if (!rime_api) {
+    AuditLogger::Log(L"v2_pinyin", L"LoadConfig failed: rime_api unavailable");
     return false;
   }
 
   RimeConfig config = {NULL};
   if (!rime_api->config_open(config_name.c_str(), &config)) {
+    AuditLogger::Log(L"v2_pinyin",
+                     L"LoadConfig failed: unable to open " + u8tow(config_name));
     return false;
   }
 
@@ -485,6 +489,7 @@ bool V2PinyinTranslationProvider::LoadConfig(const std::string& config_name) {
       !llm_enabled) {
     rime_api->config_close(&config);
     m_enabled = false;
+    AuditLogger::Log(L"v2_pinyin", L"LoadConfig finished: llm disabled");
     return false;
   }
 
@@ -494,6 +499,8 @@ bool V2PinyinTranslationProvider::LoadConfig(const std::string& config_name) {
       !enabled) {
     rime_api->config_close(&config);
     m_enabled = false;
+    AuditLogger::Log(L"v2_pinyin",
+                     L"LoadConfig finished: pinyin translation disabled");
     return false;
   }
   m_enabled = true;
@@ -514,6 +521,9 @@ bool V2PinyinTranslationProvider::LoadConfig(const std::string& config_name) {
     }
     rime_api->config_close(&config);
     m_enabled = false;
+    AuditLogger::Log(L"v2_pinyin",
+                     L"LoadConfig failed: unsupported provider_type=" +
+                         u8tow(provider_type));
     return false;
   }
 
@@ -544,6 +554,9 @@ bool V2PinyinTranslationProvider::LoadConfig(const std::string& config_name) {
     g_dev_console->WriteLine(L"  timeout_ms: " +
                              std::to_wstring(m_timeout_ms));
   }
+  AuditLogger::Log(L"v2_pinyin",
+                   L"LoadConfig succeeded, api_url=" + u8tow(m_api_url) +
+                       L", timeout_ms=" + std::to_wstring(m_timeout_ms));
 
   return true;
 }
@@ -555,14 +568,27 @@ std::vector<std::wstring> V2PinyinTranslationProvider::ExecuteRequest(
   if (!IsAvailable() ||
       request.type != LLMRequestType::PinyinConstrainedPrediction ||
       request.current_input.empty()) {
+    AuditLogger::Log(
+        L"v2_pinyin",
+        L"ExecuteRequest skipped, available=" +
+            std::to_wstring(IsAvailable() ? 1 : 0) + L", input_chars=" +
+            std::to_wstring(request.current_input.size()));
     return candidates;
   }
 
   const std::string normalized_pinyin =
       NormalizeV2PinyinInput(request.current_input);
   if (normalized_pinyin.empty()) {
+    AuditLogger::Log(L"v2_pinyin",
+                     L"ExecuteRequest skipped: normalized input is empty");
     return candidates;
   }
+  AuditLogger::Log(
+      L"v2_pinyin",
+      L"ExecuteRequest started, input=" + request.current_input +
+          L", normalized=" + u8tow(normalized_pinyin) + L", context_chars=" +
+          std::to_wstring(request.context.size()) + L", candidate_pool=" +
+          std::to_wstring(request.rime_candidates.size()));
 
   std::wstring context = request.context;
   if (context.size() > 80) {
@@ -582,6 +608,7 @@ std::vector<std::wstring> V2PinyinTranslationProvider::ExecuteRequest(
 
   std::string response_body;
   if (!ExecuteHttpRequest(m_api_url, json.str(), response_body)) {
+    AuditLogger::Log(L"v2_pinyin", L"ExecuteRequest failed: HTTP request failed");
     return candidates;
   }
 
@@ -597,6 +624,9 @@ std::vector<std::wstring> V2PinyinTranslationProvider::ExecuteRequest(
       candidates.size() > request.max_candidates) {
     candidates.resize(request.max_candidates);
   }
+  AuditLogger::Log(L"v2_pinyin",
+                   L"ExecuteRequest finished, response_candidates=" +
+                       std::to_wstring(candidates.size()));
   return candidates;
 }
 
@@ -622,6 +652,7 @@ bool V2PinyinTranslationProvider::ExecuteHttpRequest(
   url_comp.lpszUrlPath = path;
 
   if (!WinHttpCrackUrl(url_w.c_str(), (DWORD)url_w.length(), 0, &url_comp)) {
+    AuditLogger::Log(L"v2_pinyin", L"HTTP request failed: invalid URL " + u8tow(url));
     return false;
   }
 
@@ -648,12 +679,16 @@ bool V2PinyinTranslationProvider::ExecuteHttpRequest(
                     is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_NAME : NULL,
                     is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_BYPASS : NULL, 0);
     if (!hSession) {
+      AuditLogger::Log(L"v2_pinyin",
+                       L"HTTP request failed: WinHttpOpen session error");
       return false;
     }
     WinHttpSetTimeouts(hSession, 5000, 5000, m_timeout_ms, m_timeout_ms);
     hConnect = WinHttpConnect(hSession, hostname_str.c_str(), port, 0);
     if (!hConnect) {
       WinHttpCloseHandle(hSession);
+      AuditLogger::Log(L"v2_pinyin",
+                       L"HTTP request failed: WinHttpConnect error");
       return false;
     }
     m_hSession = hSession;
@@ -666,6 +701,8 @@ bool V2PinyinTranslationProvider::ExecuteHttpRequest(
       WINHTTP_DEFAULT_ACCEPT_TYPES, use_https ? WINHTTP_FLAG_SECURE : 0);
   if (!hRequest) {
     CloseConnection();
+    AuditLogger::Log(L"v2_pinyin",
+                     L"HTTP request failed: WinHttpOpenRequest error");
     return false;
   }
 
@@ -675,12 +712,16 @@ bool V2PinyinTranslationProvider::ExecuteHttpRequest(
           (DWORD)request_body.length(), (DWORD)request_body.length(), 0)) {
     WinHttpCloseHandle(hRequest);
     CloseConnection();
+    AuditLogger::Log(L"v2_pinyin",
+                     L"HTTP request failed: WinHttpSendRequest error");
     return false;
   }
 
   if (!WinHttpReceiveResponse(hRequest, NULL)) {
     WinHttpCloseHandle(hRequest);
     CloseConnection();
+    AuditLogger::Log(L"v2_pinyin",
+                     L"HTTP request failed: WinHttpReceiveResponse error");
     return false;
   }
 
@@ -700,6 +741,9 @@ bool V2PinyinTranslationProvider::ExecuteHttpRequest(
   }
 
   WinHttpCloseHandle(hRequest);
+  AuditLogger::Log(L"v2_pinyin",
+                   L"HTTP request finished, response_bytes=" +
+                       std::to_wstring(response_body.size()));
   return !response_body.empty();
 }
 
@@ -764,6 +808,7 @@ bool AlphaRerankProvider::LoadConfig(const std::string& config_name) {
       g_dev_console->WriteLine(
           L"[Alpha Rerank] LoadConfig失败: rime_api未初始化");
     }
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK", L"LoadConfig failed: rime_api unavailable");
     return false;
   }
 
@@ -774,6 +819,8 @@ bool AlphaRerankProvider::LoadConfig(const std::string& config_name) {
           L"[Alpha Rerank] LoadConfig失败: 无法打开配置文件 " +
           u8tow(config_name));
     }
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                     L"LoadConfig failed: unable to open " + u8tow(config_name));
     return false;
   }
 
@@ -782,6 +829,7 @@ bool AlphaRerankProvider::LoadConfig(const std::string& config_name) {
       !llm_enabled) {
     rime_api->config_close(&config);
     m_enabled = false;
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK", L"LoadConfig finished: llm disabled");
     return false;
   }
 
@@ -791,6 +839,7 @@ bool AlphaRerankProvider::LoadConfig(const std::string& config_name) {
       !enabled) {
     rime_api->config_close(&config);
     m_enabled = false;
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK", L"LoadConfig finished: rerank disabled");
     return false;
   }
   m_enabled = true;
@@ -809,6 +858,9 @@ bool AlphaRerankProvider::LoadConfig(const std::string& config_name) {
     }
     rime_api->config_close(&config);
     m_enabled = false;
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                     L"LoadConfig failed: unsupported provider_type=" +
+                         u8tow(provider_type));
     return false;
   }
 
@@ -836,6 +888,9 @@ bool AlphaRerankProvider::LoadConfig(const std::string& config_name) {
     g_dev_console->WriteLine(L"  api_url: " + u8tow(m_api_url));
     g_dev_console->WriteLine(L"  timeout_ms: " + std::to_wstring(m_timeout_ms));
   }
+  AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                   L"LoadConfig succeeded, api_url=" + u8tow(m_api_url) +
+                       L", timeout_ms=" + std::to_wstring(m_timeout_ms));
 
   return true;
 }
@@ -846,8 +901,23 @@ std::vector<std::wstring> AlphaRerankProvider::ExecuteRequest(
   std::vector<std::wstring> candidates;
   if (!IsAvailable() || request.type != LLMRequestType::RimeReorder ||
       request.rime_candidates.empty()) {
+    AuditLogger::Log(
+        L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+        L"ExecuteRequest skipped, available=" +
+            std::to_wstring(IsAvailable() ? 1 : 0) + L", request_type=" +
+            std::to_wstring(static_cast<int>(request.type)) +
+            L", candidate_pool=" +
+            std::to_wstring(request.rime_candidates.size()));
     return candidates;
   }
+  AuditLogger::Log(
+      L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+      L"ExecuteRequest started, input=" + request.current_input +
+          L", context_chars=" + std::to_wstring(request.context.size()) +
+          L", candidate_pool=" + std::to_wstring(request.rime_candidates.size()) +
+          L", top_k=" +
+          std::to_wstring(request.max_candidates > 0 ? request.max_candidates
+                                                     : request.rime_candidates.size()));
 
   std::ostringstream json;
   json << "{"
@@ -869,6 +939,7 @@ std::vector<std::wstring> AlphaRerankProvider::ExecuteRequest(
   const std::string request_body = json.str();
   std::string response_body;
   if (!ExecuteHttpRequest(m_api_url, request_body, response_body)) {
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK", L"ExecuteRequest failed: HTTP request failed");
     return candidates;
   }
 
@@ -882,6 +953,11 @@ std::vector<std::wstring> AlphaRerankProvider::ExecuteRequest(
       m_last_rerank_indices.size() > request.max_candidates) {
     m_last_rerank_indices.resize(request.max_candidates);
   }
+  AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                   L"ExecuteRequest finished, ranked_candidates=" +
+                       std::to_wstring(candidates.size()) +
+                       L", ranked_indices=" +
+                       std::to_wstring(m_last_rerank_indices.size()));
   return candidates;
 }
 
@@ -906,6 +982,7 @@ bool AlphaRerankProvider::ExecuteHttpRequest(const std::string& url,
   url_comp.lpszUrlPath = path;
 
   if (!WinHttpCrackUrl(url_w.c_str(), (DWORD)url_w.length(), 0, &url_comp)) {
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK", L"HTTP request failed: invalid URL " + u8tow(url));
     return false;
   }
 
@@ -932,6 +1009,8 @@ bool AlphaRerankProvider::ExecuteHttpRequest(const std::string& url,
                     is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_NAME : NULL,
                     is_localhost ? (LPCWSTR)WINHTTP_NO_PROXY_BYPASS : NULL, 0);
     if (!hSession) {
+      AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                       L"HTTP request failed: WinHttpOpen session error");
       return false;
     }
     const int receive_timeout = (std::max)(m_timeout_ms, 50);
@@ -939,6 +1018,8 @@ bool AlphaRerankProvider::ExecuteHttpRequest(const std::string& url,
     hConnect = WinHttpConnect(hSession, hostname_str.c_str(), port, 0);
     if (!hConnect) {
       WinHttpCloseHandle(hSession);
+      AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                       L"HTTP request failed: WinHttpConnect error");
       return false;
     }
     m_hSession = hSession;
@@ -951,6 +1032,8 @@ bool AlphaRerankProvider::ExecuteHttpRequest(const std::string& url,
       WINHTTP_DEFAULT_ACCEPT_TYPES, use_https ? WINHTTP_FLAG_SECURE : 0);
   if (!hRequest) {
     CloseConnection();
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                     L"HTTP request failed: WinHttpOpenRequest error");
     return false;
   }
 
@@ -960,12 +1043,16 @@ bool AlphaRerankProvider::ExecuteHttpRequest(const std::string& url,
           (DWORD)request_body.length(), (DWORD)request_body.length(), 0)) {
     WinHttpCloseHandle(hRequest);
     CloseConnection();
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                     L"HTTP request failed: WinHttpSendRequest error");
     return false;
   }
 
   if (!WinHttpReceiveResponse(hRequest, NULL)) {
     WinHttpCloseHandle(hRequest);
     CloseConnection();
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                     L"HTTP request failed: WinHttpReceiveResponse error");
     return false;
   }
 
@@ -984,6 +1071,9 @@ bool AlphaRerankProvider::ExecuteHttpRequest(const std::string& url,
   }
 
   WinHttpCloseHandle(hRequest);
+  AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                   L"HTTP request finished, response_bytes=" +
+                       std::to_wstring(response_body.size()));
   return !response_body.empty();
 }
 
@@ -999,13 +1089,20 @@ std::vector<std::wstring> AlphaRerankProvider::ParseResponse(
     m_last_rerank_indices = ParseSizeArrayField(root, "ranked_indices");
     candidates = ParseStringArrayField(root, "ranked_candidates");
     if (!candidates.empty()) {
+      AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                       L"ParseResponse resolved ranked_candidates=" +
+                           std::to_wstring(candidates.size()));
       return candidates;
     }
     candidates = ParseStringArrayField(root, "candidates");
     if (!candidates.empty()) {
+      AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                       L"ParseResponse resolved fallback candidates=" +
+                           std::to_wstring(candidates.size()));
       return candidates;
     }
   } catch (...) {
+    AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK", L"ParseResponse JSON parse failed");
   }
 
   const char* field_names[] = {"\"responses\"", "\"content\""};
@@ -1054,6 +1151,9 @@ std::vector<std::wstring> AlphaRerankProvider::ParseResponse(
       candidates.push_back(word);
     }
   }
+  AuditLogger::Log(L"已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK",
+                   L"ParseResponse resolved plain-text candidates=" +
+                       std::to_wstring(candidates.size()));
 
   return candidates;
 }
