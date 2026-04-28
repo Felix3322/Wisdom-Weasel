@@ -131,7 +131,7 @@ patch:
 
 ## 当前打分逻辑（2026-03）
 
-当前 DLL 主链路里的候选分数可以概括为：
+旧版 DLL 主链路里的候选分数可以概括为：
 
 ```text
 final_score
@@ -150,6 +150,46 @@ final_score
 - `order_prior`
   - Lua 侧叠加的一点原始顺序先验
   - 用于保证排序稳定性，避免分数极接近时抖动
+
+## 当前在线融合逻辑（2026-04）
+
+当前在线重排已经切到“分支拆分 + Lua 门控融合”：
+
+```text
+alpha_input:
+  semantic_score
+  preference_score
+  user_frequency_score
+  final_score = semantic_score + preference_score + user_frequency_score
+
+alpha_rerank.lua:
+  gated_score
+    = g_semantic(candidate, context) * semantic_score
+    + g_preference(candidate, context) * preference_score
+    + g_user_frequency(candidate, context) * user_frequency_score
+    + g_continuation(candidate, context) * continuation_prior
+    + order_prior
+    + quality_prior
+    + input_coverage_prior
+    + contrastive_bonus
+```
+
+其中：
+
+- `semantic_score`
+  - 仍来自 `alpha_input.dll`
+  - 适合内容词、命名实体、长候选
+- `preference_score`
+  - 仍来自用户正负反馈向量
+- `user_frequency_score`
+  - 来自显式用户选词频次记忆
+  - 用于保守拉升常用短词、中性词和高频个人用语
+- `continuation_prior`
+  - 在 Lua 侧根据候选类型、长度、上下文置信度、输入码长做 continuation 风格补偿
+  - 专门用于把虚词、连词、单字短候选从“纯语义失真”里拉回来
+- `g_semantic / g_preference / g_continuation`
+  - 不是常数
+  - 会随 `候选长度 / 是否虚词 / context_confidence / 输入码长 / 候选类型` 动态调整
 
 ### preference_score 细分
 
@@ -223,6 +263,7 @@ new_vector = old_vector * (1 - alpha) + sample_vector * alpha
 长期偏好会保存到：
 
 - `alpha_backend/user_preference.json`
+- `alpha_backend/user_frequency.json`
 
 当前快照包含：
 
