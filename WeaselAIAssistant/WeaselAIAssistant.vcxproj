@@ -35,9 +35,9 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{A68C2A5C-D74D-4CB2-9E22-A4D2FC256A2D}</ProjectGuid>
+    <ProjectGuid>{EE9877C1-9E67-4074-96E3-7ECDDCF80181}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
-    <RootNamespace>WeaselServer</RootNamespace>
+    <RootNamespace>WeaselAIAssistant</RootNamespace>
   </PropertyGroup>
   <Import Project="..\weasel.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -485,10 +485,10 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="AIAssistantStandalone.cpp" />
-    <ClCompile Include="AIAssistantDialog.cpp" />
-    <ClCompile Include="AIAssistantService.cpp" />
-    <ClCompile Include="stdafx.cpp">
+    <ClCompile Include="..\WeaselServer\AIAssistantDialog.cpp" />
+    <ClCompile Include="..\WeaselServer\AIAssistantService.cpp" />
+    <ClCompile Include="..\WeaselServer\AIAssistantStandalone.cpp" />
+    <ClCompile Include="..\WeaselServer\stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
@@ -498,58 +498,28 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="ContextHistory.cpp" />
-    <ClCompile Include="DevConsole.cpp" />
-    <ClCompile Include="MemoryCompressor.cpp" />
-    <ClCompile Include="HFConstraintProvider.cpp" />
-    <ClCompile Include="LLMProvider.cpp" />
-    <ClCompile Include="LlamaCppProvider.cpp" />
-    <ClCompile Include="SystemTraySDK.cpp" />
-    <ClCompile Include="WeaselServer.cpp" />
-    <ClCompile Include="WeaselServerApp.cpp" />
-    <ClCompile Include="WeaselService.cpp" />
-    <ClCompile Include="WeaselTrayIcon.cpp" />
+    <ClCompile Include="WeaselAIAssistant.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="AIAssistantStandalone.h" />
-    <ClInclude Include="AIAssistantDialog.h" />
-    <ClInclude Include="AIAssistantService.h" />
-    <ClInclude Include="ContextHistory.h" />
-    <ClInclude Include="DevConsole.h" />
-    <ClInclude Include="MemoryCompressor.h" />
-    <ClInclude Include="resource.h" />
-    <ClInclude Include="stdafx.h" />
-    <ClInclude Include="SystemTraySDK.h" />
-    <ClInclude Include="WeaselServerApp.h" />
-    <ClInclude Include="WeaselService.h" />
-    <ClInclude Include="WeaselTrayIcon.h" />
+    <ClInclude Include="..\WeaselServer\AIAssistantDialog.h" />
+    <ClInclude Include="..\WeaselServer\AIAssistantService.h" />
+    <ClInclude Include="..\WeaselServer\AIAssistantStandalone.h" />
+    <ClInclude Include="..\WeaselServer\resource.h" />
+    <ClInclude Include="..\WeaselServer\stdafx.h" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="WeaselServer.rc" />
+    <ResourceCompile Include="WeaselAIAssistant.rc" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\RimeWithWeasel\RimeWithWeasel.vcxproj">
       <Project>{1c497821-bd63-4f02-9094-32b185b62f23}</Project>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
-    <ProjectReference Include="..\WeaselIPCServer\WeaselIPCServer.vcxproj">
-      <Project>{26930622-cfa2-43df-a9f3-4aa4a313b2a4}</Project>
-      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
-    </ProjectReference>
-    <ProjectReference Include="..\WeaselIPC\WeaselIPC.vcxproj">
-      <Project>{ce11a2df-8d20-4b07-a935-4b0d03f0303d}</Project>
-      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
-    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\resource\en.ico" />
-    <None Include="..\resource\reload.ico" />
-    <None Include="..\resource\zh.ico" />
     <None Include="..\resource\weasel.ico" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="..\resource\full.ico" />
-    <Image Include="..\resource\half.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
