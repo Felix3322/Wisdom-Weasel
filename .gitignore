@@ -85,3 +85,32 @@ llamatest/
 pr7_comments.json
 /deploy-backup-*/
 /tmp-codex-deploy-weasel.ps1
+
+# Local build/test artifacts
+build_*.txt
+build_*.json
+test_build_*.txt
+test_build_*.json
+release_bundle_*.txt
+release_bundle_*.json
+alpha_*_raw.txt
+ollama_*.json
+output/*.ps1
+
+# Local runtime state
+alpha_backend/user_frequency.json
+version_2/**/*.pid
+version_2/**/__pycache__/
+asr_backend/models/
+asr_backend/app/__pycache__/
+
+# Office temporary and generated backups
+docs/~$*.pptx
+docs/*backup*.pptx
+version_2/*.pth
+version_2/*.pt
+version_2/*.onnx
+version_2/*.bin
+version_2/*.pid
+version_2/__pycache__/
+version_2/html_demo/__pycache__/
