@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::env;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::Instant;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 const RECENT_TAIL_CHARS: usize = 24;
 const ORDER_PRIORITY_WEIGHT: f32 = 0.03;
+static TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Deserialize)]
 struct RerankRequest {
@@ -29,6 +31,19 @@ struct RerankResponse {
     ranked_indices: Vec<usize>,
     ranked_candidates: Vec<String>,
     scores: Vec<f32>,
+    raw_ranked_indices: Vec<usize>,
+    raw_ranked_candidates: Vec<String>,
+    guarded_ranked_indices: Vec<usize>,
+    guarded_ranked_candidates: Vec<String>,
+    raw_top1: Option<String>,
+    guarded_top1: Option<String>,
+    score_status: &'static str,
+    fallback_case_count: usize,
+    low_context_confidence_case_count: usize,
+    score_unavailable_case_count: usize,
+    guard_triggered: bool,
+    guard_reason: Option<String>,
+    trace_id: String,
     latency_ms: f64,
     branches: Vec<String>,
 }
@@ -36,6 +51,11 @@ struct RerankResponse {
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+fn next_trace_id() -> String {
+    let sequence = TRACE_SEQUENCE.fetch_add(1, AtomicOrdering::Relaxed);
+    format!("已淘汰，请移步至ALPHA_LUA WEASEL_HTTP_RERANK-{sequence:08}")
 }
 
 fn main() {
@@ -158,17 +178,32 @@ fn handle_rerank(
         );
     }
 
+    let trace_id = next_trace_id();
     let top_k = req.top_k.unwrap_or(req.candidates.len()).max(1);
     let branch_contexts = build_branch_contexts(&req.context, req.current_input.as_deref());
     if branch_contexts.is_empty() {
         let ranked_candidates = req.candidates.into_iter().take(top_k).collect::<Vec<_>>();
         let scores = vec![0.0; ranked_candidates.len()];
+        let ranked_indices = (0..ranked_candidates.len()).collect::<Vec<_>>();
         return json_response(
             StatusCode(200),
             &RerankResponse {
-                ranked_indices: (0..ranked_candidates.len()).collect(),
-                ranked_candidates,
+                ranked_indices: ranked_indices.clone(),
+                ranked_candidates: ranked_candidates.clone(),
                 scores,
+                raw_ranked_indices: ranked_indices.clone(),
+                raw_ranked_candidates: ranked_candidates.clone(),
+                guarded_ranked_indices: ranked_indices,
+                guarded_ranked_candidates: ranked_candidates.clone(),
+                raw_top1: None,
+                guarded_top1: ranked_candidates.first().cloned(),
+                score_status: "skipped",
+                fallback_case_count: 0,
+                low_context_confidence_case_count: 1,
+                score_unavailable_case_count: 1,
+                guard_triggered: false,
+                guard_reason: Some("empty_context".to_string()),
+                trace_id,
                 latency_ms: 0.0,
                 branches: Vec::new(),
             },
@@ -211,13 +246,20 @@ fn handle_rerank(
         }
     }
 
-    let mut ranked = aggregated;
-    ranked.sort_by(|lhs, rhs| {
+    let mut raw_ranked = aggregated;
+    raw_ranked.sort_by(|lhs, rhs| {
         rhs.2
             .partial_cmp(&lhs.2)
             .unwrap_or(Ordering::Equal)
             .then_with(|| lhs.0.cmp(&rhs.0))
     });
+    let raw_top1 = raw_ranked.first().map(|(_, candidate, _)| candidate.clone());
+    let mut ranked = raw_ranked.clone();
+    let guard_reason = apply_http_top1_guard(&mut ranked);
+    let guard_triggered = guard_reason.is_some();
+    let guarded_top1 = ranked.first().map(|(_, candidate, _)| candidate.clone());
+
+    let raw_ranked_limited = raw_ranked.iter().take(top_k).cloned().collect::<Vec<_>>();
     ranked.truncate(top_k);
 
     let response = RerankResponse {
@@ -227,6 +269,25 @@ fn handle_rerank(
             .map(|(_, candidate, _)| candidate.clone())
             .collect(),
         scores: ranked.iter().map(|(_, _, score)| *score).collect(),
+        raw_ranked_indices: raw_ranked_limited.iter().map(|(idx, _, _)| *idx).collect(),
+        raw_ranked_candidates: raw_ranked_limited
+            .iter()
+            .map(|(_, candidate, _)| candidate.clone())
+            .collect(),
+        guarded_ranked_indices: ranked.iter().map(|(idx, _, _)| *idx).collect(),
+        guarded_ranked_candidates: ranked
+            .iter()
+            .map(|(_, candidate, _)| candidate.clone())
+            .collect(),
+        raw_top1,
+        guarded_top1,
+        score_status: "valid",
+        fallback_case_count: 0,
+        low_context_confidence_case_count: 0,
+        score_unavailable_case_count: 0,
+        guard_triggered,
+        guard_reason,
+        trace_id,
         latency_ms: started.elapsed().as_secs_f64() * 1000.0,
         branches: branch_contexts
             .iter()
@@ -271,6 +332,70 @@ fn build_branch_contexts(context: &str, _current_input: Option<&str>) -> Vec<(St
         }
     }
     branches
+}
+
+fn char_len(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn is_modal_particle(text: &str) -> bool {
+    matches!(text, "吧" | "呀" | "啊" | "呢" | "吗" | "嘛" | "啦" | "哇" | "呐" | "么" | "了")
+}
+
+fn is_function_word(text: &str) -> bool {
+    matches!(
+        text,
+        "的" | "了" | "呢" | "吗" | "吧" | "啊" | "呀" | "就" | "也" | "都" | "还" | "再" | "又" | "才" | "并" | "且" | "而" | "但" | "却" | "或" | "及" | "与" | "和" | "把" | "被" | "给" | "向" | "从" | "对" | "在" | "以" | "因" | "为" | "于" | "将" | "让" | "使"
+    )
+}
+
+fn promotion_cap(text: &str) -> Option<(f32, &'static str)> {
+    let len = char_len(text);
+    if is_modal_particle(text) {
+        Some((0.02, "challenger_is_modal_particle"))
+    } else if is_function_word(text) {
+        Some((0.04, "challenger_is_function_word"))
+    } else if len == 1 {
+        Some((0.04, "challenger_is_single_char"))
+    } else if len <= 2 {
+        Some((0.06, "challenger_is_short_candidate"))
+    } else {
+        None
+    }
+}
+
+fn apply_http_top1_guard(ranked: &mut [(usize, String, f32)]) -> Option<String> {
+    if ranked.len() < 2 {
+        return None;
+    }
+    let Some(original_position) = ranked.iter().position(|(idx, _, _)| *idx == 0) else {
+        return None;
+    };
+    if original_position == 0 {
+        return None;
+    }
+
+    let challenger_text = ranked[0].1.clone();
+    let challenger_score = ranked[0].2;
+    let original_text = ranked[original_position].1.clone();
+    let original_score = ranked[original_position].2;
+    let Some((cap, reason)) = promotion_cap(&challenger_text) else {
+        return None;
+    };
+    let margin = challenger_score - original_score;
+    if margin > cap {
+        return None;
+    }
+
+    let original_item = ranked[original_position].clone();
+    for index in (1..=original_position).rev() {
+        ranked[index] = ranked[index - 1].clone();
+    }
+    ranked[0] = original_item;
+    Some(format!(
+        "{reason}; original_top1={}; challenger={}; raw_margin={margin:.4}; cap={cap:.4}",
+        original_text, challenger_text
+    ))
 }
 
 fn tail_chars(text: &str, keep: usize) -> String {
