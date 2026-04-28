@@ -442,7 +442,7 @@ patch:
 
 - `provider_type` 仍然是 `openai`
 - 这是因为 Wisdom-Weasel 直接把 **Ollama 当作 OpenAI-compatible API** 来调用
-- 当 API 地址是 `localhost:11434` 时，程序会自动走 Ollama 的本地 continuation 优化逻辑
+- 当前默认通过 `http://127.0.0.1:11434/v1/chat/completions` 调用本地 Ollama 模型
 
 ### Alpha 重排补丁
 
@@ -459,8 +459,26 @@ patch:
   alpha_rerank/recent_tail_chars: 16
   alpha_rerank/order_prior_weight: 0.02
   alpha_rerank/input_coverage_weight: 0.05
+  alpha_rerank/base_frequency_weight: 0.18
+  alpha_rerank/gate_semantic_weight: 0.34
+  alpha_rerank/gate_preference_weight: 0.08
+  alpha_rerank/gate_quality_weight: 0.12
+  alpha_rerank/gate_user_frequency_weight: 0.16
+  alpha_rerank/gate_continuation_weight: 0.30
+  alpha_rerank/user_frequency_short_candidate_boost: 0.0
+  alpha_rerank/user_frequency_function_word_boost: 0.0
+  alpha_rerank/function_word_continuation_boost: 0.0
+  alpha_rerank/function_word_semantic_penalty: 0.12
+  alpha_rerank/modal_particle_promotion_cap: 0.02
+  alpha_rerank/function_word_promotion_cap: 0.04
+  alpha_rerank/single_char_promotion_cap: 0.04
+  alpha_rerank/short_candidate_promotion_cap: 0.06
+  alpha_rerank/modal_particle_user_frequency_scale: 0.0
+  alpha_rerank/function_word_user_frequency_scale: 0.10
+  alpha_rerank/single_char_user_frequency_scale: 0.10
+  alpha_rerank/short_candidate_user_frequency_scale: 0.25
   alpha_rerank/preserve_first_min_chars: 0
-  alpha_rerank/log_enabled: false
+  alpha_rerank/log_enabled: true
   alpha_rerank/log_path: ""
 ```
 
@@ -469,21 +487,35 @@ patch:
 - `alpha_rerank/input_coverage_weight: 0.05`
   - 对**长拼音输入**增加一个轻量“输入覆盖先验”
   - 目标是减少短词 / 单字在长输入里意外抢到前面的情况
+- `alpha_rerank/gate_semantic_weight: 0.34`
+  - 内容词、长候选、短语候选默认更偏向 semantic 分支
+- `alpha_rerank/base_frequency_weight: 0.18`
+  - 直接把 RIME 候选自带 `quality` 当作基础词频先验使用
+- `alpha_rerank/gate_user_frequency_weight: 0.16`
+  - 用户词频只做接近候选的轻量 tie-break；虚词、语气词、单字会被禁用或强衰减
+- `alpha_rerank/gate_continuation_weight: 0.30`
+  - continuation 只表示“能否自然接上下文”，会按候选类型做判别度折损
+- `alpha_rerank/*_promotion_cap`
+  - 限制语气词、功能词、单字、短词相对原首候选的最大上浮幅度，避免靠 continuation / 用户频率冲顶
+- `alpha_rerank/*_user_frequency_scale`
+  - 对语气词、功能词、单字、短词分别缩放用户频率，避免少量历史放大高频虚词噪声
 - `alpha_rerank/preserve_first_min_chars: 0`
   - 默认**不再强制固定第一候选**
   - 如果你想恢复“首候选达到某个长度后保位”的旧 workaround，可以手动把它设成正数
 - `alpha_rerank/prefer_sentence_boundary: true`
   - 上下文优先按更干净的句子 / 子句边界截断
 - `alpha_rerank/log_path`
-  - 可选；如果开启 `log_enabled: true` 但不手动指定路径，默认写到：
-    - `%APPDATA%\Rime\alpha_rerank.log`
+  - 可选；如果开启 `log_enabled: true` 但不手动指定路径，优先跟随 `WeaselServer` 内部审计日志路径
+  - 未桥接时回退到 `%APPDATA%\Rime\alpha_rerank.log`
 
 特性：
 
 - 当前为 **Rime filter 架构**
 - 默认允许整个前部候选池参与重排
 - 长拼音输入时会额外考虑“输入覆盖度”，避免短词偷塔
+- 默认采用“semantic / preference / user frequency / continuation / base prior”门控融合，而不是单一向量相似度终排
 - 可累积长期 / 会话偏好向量
+- 可累积显式用户词频计数，并在短词 / 中性词场景下提高其排序权重
 - 可对“被跳过的更高排位候选”施加轻量负反馈
 - 自动清洗并截断上下文
 - 面向 CPU 实时场景
@@ -496,6 +528,7 @@ patch:
 默认长期偏好持久化文件：
 
 - `alpha_backend/user_preference.json`
+- `alpha_backend/user_frequency.json`
 
 ### LLM 无拼音预测
 
@@ -538,14 +571,135 @@ patch:
 | 今晚继续优化输入法 DLL 的... | cp | 重排延迟 | 重排延迟 ✅ | 产品 ❌ |
 | 老师说明天考高数，我打算先做几套... | zt | 真题 | 真题 ✅ | 状态 ❌ |
 
+### Alpha 重排 DLL 更难回归（2026-04-18）
+
+测试范围：
+
+- 直接调用 `alpha_input.dll` 的 C API
+- 模型：`qwen3-0.6b-onnx-int8`
+- 偏好：关闭
+- 结果摘要：`20` 组样例中 `14/20` 通过
+- 说明：这组结果反映的是 **DLL 本体能力**，不是完整输入法链路的最终表现
+- 回归脚本：`scripts/Test-AlphaRerankDllRegression.ps1`
+
+下面列出本轮更难样例里仍未稳定命中的案例：
+
+| 场景上下文 (Context) | 预期结果 | DLL 实际 Top1 | 备注 |
+| --- | --- | --- | --- |
+| 昨晚检测到异常登录，先去拉一下... | 审计日志 | 错误码表 | 安全审计语境 |
+| 月底给董事会汇报之前，先更新一下... | 现金流预测 | 会议纪要 | 财务语境 |
+| 法务说合作协议里还得补充... | 违约责任 | 预算申请 | 合同法务语境 |
+| 连续咳嗽发烧三天，下午准备去... | 呼吸内科 | 体检中心 | 医疗就诊语境 |
+| 论文实验结果波动很大，我想先检查... | 随机种子 | 回归报告 | 科研实验语境 |
+| 首页首屏看着很乱，先统一一下... | 视觉层级 | 数据权限 | 前端设计语境 |
+
 ---
 
-## 从源码构建
+## 从源码开始部署到可用（完整开发者教程）
+
+下面这套流程不是“你已经装好大半环境”的简写版，而是从零开始把整套环境拉起来：
+
+1. 安装 Python
+2. 安装 C++ 构建环境
+3. 安装 Ollama 并拉取本地模型
+4. 编译 Wisdom-Weasel
+5. 安装本地流式 ASR 后端
+6. 同步 `%APPDATA%\Rime`
+7. 替换小狼毫程序目录
+8. 重新部署并验证
+
+这套流程适用于：
+
+- 你本地已经拿到了仓库源码
+- 你希望从源码直接跑到“能输入、能预测、能打开 AI 助手、能做本地 ASR”
+- 你接受：
+  - `%APPDATA%\Rime` 下的文件可以直接替换
+  - `C:\Program Files\Rime\weasel-0.17.4` 下的程序文件需要管理员权限
+
+### 0. 官方下载入口
+
+- Python Windows 下载页：
+  - <https://www.python.org/downloads/windows/>
+- Python 官方 Windows 使用说明：
+  - <https://docs.python.org/3/using/windows.html>
+- Ollama Windows 下载页：
+  - <https://ollama.com/download/windows>
+- FunASR 流式中文 ASR 模型：
+  - <https://huggingface.co/funasr/paraformer-zh-streaming>
+
+### 1. 安装 Python
+
+截至 **2026-04-12**，本仓库已经验证过：
+
+- `Python 3.13 x64`
+- 启用 `py launcher`
+- 勾选 `Add python.exe to PATH`
+
+建议直接安装 Python 3.13 x64，不要跳到 3.14+ 再自己赌依赖兼容性。
+
+安装后先验证：
+
+```powershell
+py -0p
+python --version
+```
+
+你至少应该能看到：
+
+- `py -3.13`
+- 一个可用的 `python.exe`
+
+### 2. 安装 Windows 构建环境
+
+安装 **Visual Studio 2022 Build Tools**，至少包含：
+
+- `MSBuild`
+- `MSVC x64/x86 C++` 工具链
+- Windows 10/11 SDK
+
+如果你已经装过，验证一下：
+
+```powershell
+& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64\MSBuild.exe' -version
+```
+
+### 3. 安装 Ollama，并准备本地预测模型
+
+安装 Ollama 后，先确认命令可用：
+
+```powershell
+ollama -v
+```
+
+然后启动或等待本地 API 就绪：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:11434/api/tags
+```
+
+拉取当前开发环境默认使用的本地模型：
+
+```powershell
+ollama pull qwen3.5:0.8b
+```
+
+拉完后确认：
+
+```powershell
+ollama list
+```
+
+当前默认约定是：
+
+- 无输入预测：本地 Ollama
+- AI 助手对话 / 语气润色：复用同一个本地 Ollama 模型
+
+### 4. 从源码编译 Wisdom-Weasel
 
 请以 `build.bat` 的结果为准。  
 如果 IDE 内的编译结果和 `build.bat` 不一致，以 `build.bat` 为准。
 
-PowerShell 推荐：
+推荐命令：
 
 ```powershell
 $env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64;'
@@ -558,6 +712,211 @@ $env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildToo
 $env:DEVTOOLS_PATH='C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\amd64;'
 .\build.bat rebuild x64
 ```
+
+至少确认这些文件已经生成：
+
+- `output\WeaselServer.exe`
+- `output\WeaselAIAssistant.exe`
+- `output\WeaselDeployer.exe`
+- `output\weaselx64.dll`
+- `output\weaselx64.ime`
+- `output\lua\wanxiang\alpha_rerank_core.dll`
+
+如果你改过 Lua 重排脚本，也要确认源码里的运行时脚本已经是最新：
+
+- `third_party\rime_wanxiang\lua\wanxiang\alpha_rerank.lua`
+
+### 5. 安装本地流式 ASR 后端
+
+这个仓库现在自带一个本地中文流式 ASR 后端，目录是：
+
+- `asr_backend`
+
+它默认使用：
+
+- Python 3.13 venv
+- `funasr/paraformer-zh-streaming`
+- 本地接口：`http://127.0.0.1:8013/v1/transcribe`
+
+首次安装：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\asr_backend\Setup-StreamingASRBackend.ps1
+```
+
+这一步会做：
+
+1. 创建 `asr_backend\.venv`
+2. 安装 `FastAPI / FunASR / librosa / torchaudio` 等运行时依赖
+3. 下载 `funasr/paraformer-zh-streaming` 到本地
+
+启动后端：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\asr_backend\Start-StreamingASRBackend.ps1
+```
+
+健康检查：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8013/health
+```
+
+关闭后端：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\asr_backend\Stop-StreamingASRBackend.ps1
+```
+
+### 6. 准备 Rime 用户配置
+
+当前推荐的 `%APPDATA%\Rime\weasel.custom.yaml` 至少包含两块：
+
+```yaml
+patch:
+  server_audit:
+    enabled: true
+    # 留空时默认写到 %LOCALAPPDATA%\Temp\rime.weasel\weasel.audit.log
+    path: ""
+  assistant:
+    enabled: true
+    asr:
+      api_url: "http://127.0.0.1:8013/v1/transcribe"
+      model: "paraformer-zh-streaming"
+      timeout_ms: 120000
+  llm:
+    enabled: true
+    provider_type: openai
+    openai:
+      api_key: ""
+      api_url: "http://127.0.0.1:11434/v1/chat/completions"
+      model: "qwen3.5:0.8b"
+```
+
+说明：
+
+- `llm/openai/*` 指向本地 Ollama
+- AI 助手对话 / 润色默认复用这套本地模型
+- `assistant/asr/*` 指向本地流式 ASR 后端
+
+### 7. 替换 Rime 用户目录（无管理员）
+
+先备份自己的用户目录：
+
+```powershell
+$backup = Join-Path $env:TEMP ("Rime-backup-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+Copy-Item "$env:APPDATA\Rime" $backup -Recurse -Force
+```
+
+然后同步万象方案和 Alpha 运行时到 `%APPDATA%\Rime`：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-RimeWanxiang.ps1 -RimeUserDir "$env:APPDATA\Rime" -SourceRoot $PWD
+```
+
+这一步会同步：
+
+- `custom`
+- `dicts`
+- `lua`
+- `wanxiang*.yaml`
+- `weasel.yaml`
+- `lua\wanxiang\alpha_rerank_core.dll`
+- `lua\wanxiang\alpha_input.dll`
+- `lua\wanxiang\onnxruntime.dll`
+- `lua\wanxiang\onnxruntime_providers_shared.dll`
+
+如果你刚改过 `alpha_rerank.lua`，并且想确保运行时脚本就是当前工作区版本，可以额外执行：
+
+```powershell
+Copy-Item .\third_party\rime_wanxiang\lua\wanxiang\alpha_rerank.lua "$env:APPDATA\Rime\lua\wanxiang\alpha_rerank.lua" -Force
+```
+
+### 8. 替换程序目录（需要管理员）
+
+把本地编译出的程序文件替换到小狼毫安装目录。常见最小替换集合：
+
+```powershell
+$installDir = 'C:\Program Files\Rime\weasel-0.17.4'
+Copy-Item .\output\WeaselServer.exe $installDir -Force
+Copy-Item .\output\WeaselAIAssistant.exe $installDir -Force
+Copy-Item .\output\WeaselDeployer.exe $installDir -Force
+Copy-Item .\output\weaselx64.dll $installDir -Force
+Copy-Item .\output\weaselx64.ime $installDir -Force
+```
+
+如果你这次还改了其他程序侧文件，也应一起替换对应产物。
+
+### 9. 重新部署并重启
+
+替换完程序目录后，重新部署：
+
+```powershell
+& 'C:\Program Files\Rime\weasel-0.17.4\WeaselDeployer.exe' /deploy
+```
+
+如果文件被占用，先退出输入法相关进程，再重试。  
+如果部署后仍然是旧行为，直接重启 `WeaselServer.exe`。
+
+### 10. 验证是否真的可用
+
+建议按这个顺序验证：
+
+1. 普通拼音输入是否还能正常出候选框
+2. 无输入预测是否还能正常触发
+3. Alpha 重排是否还在生效
+4. 托盘菜单里是否出现 `AI 助手`
+5. `AI 助手 -> AI 对话 / 语气润色` 是否能正常返回结果
+6. `AI 助手 -> 音频转写` 是否能调用本地 ASR
+
+本地 ASR 可以直接用仓库内的示例音频做一次自检：
+
+```powershell
+$file = Get-Item .\asr_backend\models\paraformer-zh-streaming\example\asr_example.wav
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8013/v1/transcribe -Form @{ file = $file }
+```
+
+如果一切正常，你会看到类似：
+
+```json
+{"text":"欢迎大家来体验达摩院推出的语音识别模型"}
+```
+
+### 11. 常用日志和排错入口
+
+常用日志位置：
+
+- `%LOCALAPPDATA%\Temp\rime.weasel\*.log`
+- `%LOCALAPPDATA%\Temp\rime.weasel\weasel.audit.log`
+- `%APPDATA%\Rime\alpha_rerank.log`
+- `asr_backend\logs\asr_backend.log`
+- `asr_backend\logs\asr_backend.err.log`
+
+如果出现“完全没候选 / 没候选框”，优先检查：
+
+- `%LOCALAPPDATA%\Temp\rime.weasel\*.ERROR*.log`
+- 是否有 `lua_gears.cc` / `alpha_rerank.lua` 报错
+- `%APPDATA%\Rime\lua\wanxiang` 里的运行时文件是否真的是刚替换的版本
+
+如果出现“AI 助手能打开，但 ASR 不工作”，优先检查：
+
+- `http://127.0.0.1:8013/health` 是否可访问
+- `weasel.custom.yaml` 里的 `assistant/asr/api_url` 是否还是 `8013`
+- `asr_backend\models\paraformer-zh-streaming` 是否已经完整下载
+
+### 12. 一句话闭环
+
+最常用的本地开发闭环就是：
+
+1. 安装 Python 3.13、VS Build Tools、Ollama
+2. `ollama pull qwen3.5:0.8b`
+3. `build.bat x64`
+4. `Setup-StreamingASRBackend.ps1`
+5. `Start-StreamingASRBackend.ps1`
+6. `Install-RimeWanxiang.ps1` 同步 `%APPDATA%\Rime`
+7. 手动替换 `C:\Program Files\Rime\weasel-0.17.4` 下的程序文件
+8. `WeaselDeployer.exe /deploy`
+9. 验证拼音、预测、AI 助手、ASR
 
 ---
 
