@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Pinyin Transformer IME Demo</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #f0f0f5;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 100vh;
+        }
+
+        .header {
+            margin-top: 40px;
+            text-align: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 28px;
+            color: #333;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+
+        .editor-wrapper {
+            margin-top: 30px;
+            width: 80%;
+            max-width: 800px;
+            height: 50vh;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+            padding: 20px;
+            font-size: 22px;
+            line-height: 1.6;
+            outline: none;
+            position: relative;
+            cursor: text;
+            overflow-y: auto;
+        }
+
+        #committed-text {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            color: #111;
+        }
+
+        #composing-pinyin {
+            text-decoration: underline;
+            text-decoration-color: #007aff;
+            text-decoration-thickness: 2px;
+            color: #007aff;
+        }
+
+        #cursor {
+            display: inline-block;
+            width: 2px;
+            height: 1.2em;
+            background-color: #007aff;
+            border-radius: 1px;
+            vertical-align: text-bottom;
+            transition: opacity 0.1s;
+        }
+
+        .cursor-blink {
+            animation: blink 1s step-end infinite;
+        }
+
+        @keyframes blink {
+            50% {
+                opacity: 0;
+            }
+        }
+
+        #candidate-container {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.96);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+            display: none;
+            padding: 6px;
+            z-index: 9999;
+            flex-direction: row;
+            gap: 4px;
+            pointer-events: none;
+        }
+
+        #candidate-container.active {
+            display: flex;
+            pointer-events: auto;
+        }
+
+        .cand-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+
+        .cand-item:hover {
+            background: #f0f0f5;
+        }
+
+        .cand-item.selected {
+            background: #007aff;
+            color: #fff;
+        }
+
+        .cand-item.selected .cand-num,
+        .cand-item.selected .cand-prob {
+            color: rgba(255, 255, 255, 0.8);
+        }
+
+        .cand-num {
+            font-size: 13px;
+            color: #8e8e93;
+            margin-right: 4px;
+        }
+
+        .cand-word {
+            font-size: 20px;
+            font-weight: 500;
+        }
+
+        .cand-prob {
+            font-size: 11px;
+            color: #8e8e93;
+            margin-top: 4px;
+        }
+
+        #hidden-input {
+            position: fixed;
+            top: -1000px;
+            left: -1000px;
+            opacity: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="header">
+        <h1>Pinyin Transformer Demo</h1>
+        <p>支持英文输入拼音，模拟系统拼音输入法。<br />空格键选择首个候选词，数字键 1-5 选择候选词，拼音状态回车输入原始字母。</p>
+    </div>
+
+    <div class="editor-wrapper" id="editor" tabindex="0">
+        <span id="committed-text"></span><span id="composing-pinyin"></span><span id="cursor"
+            class="cursor-blink"></span>
+    </div>
+
+    <input type="text" id="hidden-input" autocomplete="off" spellcheck="false" autocorrect="off" autocapitalize="off">
+    <div id="candidate-container"></div>
+
+    <script>
+        const editor = document.getElementById('editor');
+        const committedEl = document.getElementById('committed-text');
+        const composingEl = document.getElementById('composing-pinyin');
+        const cursorEl = document.getElementById('cursor');
+        const candidateBox = document.getElementById('candidate-container');
+        const hiddenInput = document.getElementById('hidden-input');
+
+        let context = "";
+        let pinyin = "";
+        let candidates = [];
+        let curSelectIndex = 0;
+        let debounceTimer = null;
+
+        function focusInput() {
+            hiddenInput.focus();
+            cursorEl.classList.add('cursor-blink');
+            cursorEl.style.display = 'inline-block';
+        }
+
+        document.addEventListener('DOMContentLoaded', focusInput);
+        editor.addEventListener('click', focusInput);
+
+        hiddenInput.addEventListener('blur', () => {
+            cursorEl.classList.remove('cursor-blink');
+            cursorEl.style.display = 'none';
+        });
+
+        hiddenInput.addEventListener('keydown', (e) => {
+            const k = e.key;
+
+            if (pinyin.length > 0) {
+                if (k === ' ' || k === 'Spacebar') {
+                    e.preventDefault();
+                    if (candidates.length > 0) selectCandidate(curSelectIndex);
+                    return;
+                }
+                if (k === 'Enter') {
+                    // Enter commits the raw pinyin English letters
+                    e.preventDefault();
+                    commit(pinyin);
+                    return;
+                }
+                if (k === 'Backspace') {
+                    e.preventDefault();
+                    pinyin = pinyin.slice(0, -1);
+                    updateUI();
+                    return;
+                }
+                if (k >= '1' && k <= '5') {
+                    e.preventDefault();
+                    let idx = parseInt(k) - 1;
+                    if (candidates.length > idx) selectCandidate(idx);
+                    return;
+                }
+                if (/^[a-zA-Z]$/.test(k)) {
+                    e.preventDefault();
+                    pinyin += k;
+                    updateUI();
+                    return;
+                }
+            } else {
+                if (k === 'Backspace') {
+                    e.preventDefault();
+                    if (context.length > 0) {
+                        context = context.slice(0, -1);
+                        updateUI();
+                    }
+                    return;
+                }
+                if (k === 'Enter') {
+                    e.preventDefault();
+                    commit('\n');
+                    return;
+                }
+                if (k === ' ') {
+                    e.preventDefault();
+                    commit(' ');
+                    return;
+                }
+                // Only capture letters to start pinyin
+                if (/^[a-zA-Z]$/.test(k)) {
+                    e.preventDefault();
+                    pinyin += k;
+                    updateUI();
+                    return;
+                }
+                // Allow other printable chars to just append
+                if (k.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                    e.preventDefault();
+                    commit(k);
+                }
+            }
+        });
+
+        function commit(text) {
+            context += text;
+            pinyin = "";
+            candidates = [];
+            curSelectIndex = 0;
+            updateUI();
+        }
+
+        window.selectCandidate = function (idx) {
+            if (candidates && candidates.length > idx) {
+                commit(candidates[idx].text);
+            }
+            focusInput();
+        }
+
+        function updateUI() {
+            committedEl.textContent = context;
+            composingEl.textContent = pinyin;
+
+            if (pinyin.length === 0) {
+                candidateBox.classList.remove('active');
+                return;
+            }
+
+            positionCandidateBox();
+            candidateBox.innerHTML = '<div style="padding: 10px; font-size: 14px; color: #888;">正在预测...</div>';
+            candidateBox.classList.add('active');
+
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(fetchCandidates, 200);
+
+            // auto scroll editor to bottom
+            editor.scrollTop = editor.scrollHeight;
+        }
+
+        function positionCandidateBox() {
+            const rect = composingEl.getBoundingClientRect();
+            candidateBox.style.top = (rect.bottom + window.scrollY + 8) + 'px';
+            candidateBox.style.left = (rect.left + window.scrollX) + 'px';
+        }
+
+        async function fetchCandidates() {
+            if (pinyin.length === 0) return;
+            try {
+                // Max 32 chars context
+                let cx = context.slice(-32);
+                const res = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ context: cx, pinyin: pinyin })
+                });
+
+                if (!res.ok) throw new Error('Network response was not ok');
+
+                const data = await res.json();
+                candidates = data.candidates || [];
+                renderCandidates();
+            } catch (err) {
+                console.error(err);
+                candidateBox.innerHTML = '<div style="padding: 10px; font-size: 14px; color: #ff3b30;">预测失败，请检查后端是否运行。</div>';
+            }
+        }
+
+        function renderCandidates() {
+            if (candidates.length === 0) {
+                candidateBox.innerHTML = '<div style="padding: 10px; font-size: 14px; color: #888;">无候选词</div>';
+                return;
+            }
+            candidateBox.innerHTML = '';
+            candidates.forEach((cand, idx) => {
+                let probText = (cand.probability * 100).toFixed(1) + '%';
+                let isSel = idx === curSelectIndex ? 'selected' : '';
+                let html = `
+                    <div class="cand-item ${isSel}" onclick="selectCandidate(${idx})">
+                        <div><span class="cand-num">${idx + 1}.</span><span class="cand-word">${cand.text}</span></div>
+                        <div class="cand-prob">${probText}</div>
+                    </div>
+                `;
+                candidateBox.insertAdjacentHTML('beforeend', html);
+            });
+            positionCandidateBox();
+        }
+    </script>
+</body>
+
+</html> 
