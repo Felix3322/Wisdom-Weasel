@@ -1,0 +1,250 @@
+// Microsoft Visual C++ generated resource script.
+//
+#pragma code_page(65001)
+#include "../WeaselServer/resource.h"
+#ifndef APSTUDIO_INVOKED
+#include "../include/resource.h"
+ #define STRZ2(x) #x
+ #define STRZ(x) STRZ2(x)
+#endif
+
+#define APSTUDIO_READONLY_SYMBOLS
+/////////////////////////////////////////////////////////////////////////////
+//
+// Generated from the TEXTINCLUDE 2 resource.
+//
+#include "afxres.h"
+
+/////////////////////////////////////////////////////////////////////////////
+#undef APSTUDIO_READONLY_SYMBOLS
+
+/////////////////////////////////////////////////////////////////////////////
+// Chinese (Simplified, China) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_CHS)
+LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED
+
+#ifndef APSTUDIO_INVOKED
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+ PRODUCTVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+ FILEFLAGSMASK 0x17L
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x4L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "Comments", "Powered by RIME | 中州韵输入法引擎"
+            VALUE "CompanyName", "式恕堂"
+            VALUE "FileDescription", "小狼毫 AI 助手"
+            VALUE "FileVersion", FILE_VERSION
+            VALUE "InternalName", "WeaselAIAssistant"
+            VALUE "LegalCopyright", "式恕堂 版权所无"
+            VALUE "OriginalFilename", "WeaselAIAssistant.exe"
+            VALUE "ProductName", "小狼毫"
+            VALUE "ProductVersion", STRZ(PRODUCT_VERSION)
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
+#endif /* APSTUDIO_INVOKED */
+
+IDI_WEASEL ICON "..\\resource\\weasel.ico"
+
+STRINGTABLE
+BEGIN
+    IDS_STR_SYSTEM_VERSION_WARNING_CAPTION "系统版本过低"
+    IDS_STR_SYSTEM_VERSION_WARNING "仅支持Windows 8.1或更高版本系统"
+    IDS_STR_UNDER_MAINTENANCE "维护中"
+END
+
+IDD_AI_ASSISTANT DIALOGEX 0, 0, 360, 305
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "AI 助手"
+FONT 9, "Microsoft YaHei UI", 0, 0, 0x1
+BEGIN
+    LTEXT           "模式",IDC_STATIC,10,10,18,8
+    COMBOBOX        IDC_AI_MODE,34,8,82,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "风格",IDC_AI_LABEL_TONE,128,10,18,8
+    COMBOBOX        IDC_AI_TONE,152,8,82,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "音频文件",IDC_AI_LABEL_FILE,10,33,30,8
+    EDITTEXT        IDC_AI_FILEPATH,46,31,238,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "浏览...",IDC_AI_BROWSE,290,30,60,14
+    LTEXT           "对话历史",IDC_AI_LABEL_HISTORY,10,54,30,8
+    EDITTEXT        IDC_AI_HISTORY,10,64,340,70,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | ES_READONLY
+    LTEXT           "输入内容",IDC_AI_LABEL_INPUT,10,142,30,8
+    EDITTEXT        IDC_AI_INPUT,10,152,340,44,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
+    LTEXT           "输出结果",IDC_AI_LABEL_RESULT,10,204,30,8
+    EDITTEXT        IDC_AI_RESULT,10,214,340,48,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | ES_READONLY
+    LTEXT           "",IDC_AI_STATUS,10,270,180,18
+    PUSHBUTTON      "执行",IDC_AI_RUN,196,270,48,14
+    PUSHBUTTON      "复制结果",IDC_AI_COPY,248,270,48,14
+    PUSHBUTTON      "清空",IDC_AI_CLEAR,302,270,48,14
+END
+
+#endif    // Chinese (Simplified, China) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////
+// Chinese (Traditional, Taiwan) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_CHT)
+LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL
+
+#ifndef APSTUDIO_INVOKED
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+ PRODUCTVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+ FILEFLAGSMASK 0x17L
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x4L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404b0"
+        BEGIN
+            VALUE "Comments", "Powered by RIME | 中州韻輸入法引擎"
+            VALUE "CompanyName", "式恕堂"
+            VALUE "FileDescription", "小狼毫 AI 助手"
+            VALUE "FileVersion", FILE_VERSION
+            VALUE "InternalName", "WeaselAIAssistant"
+            VALUE "LegalCopyright", "式恕堂 版權所無"
+            VALUE "OriginalFilename", "WeaselAIAssistant.exe"
+            VALUE "ProductName", "小狼毫"
+            VALUE "ProductVersion", STRZ(PRODUCT_VERSION)
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x404, 1200
+    END
+END
+#endif /* APSTUDIO_INVOKED */
+
+STRINGTABLE
+BEGIN
+    IDS_STR_SYSTEM_VERSION_WARNING_CAPTION "系統版本過低"
+    IDS_STR_SYSTEM_VERSION_WARNING "僅支持Windows 8.1或更高版本系統"
+    IDS_STR_UNDER_MAINTENANCE "維護中"
+END
+
+IDD_AI_ASSISTANT DIALOGEX 0, 0, 360, 305
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "AI 助手"
+FONT 9, "Microsoft YaHei UI", 0, 0, 0x1
+BEGIN
+    LTEXT           "模式",IDC_STATIC,10,10,18,8
+    COMBOBOX        IDC_AI_MODE,34,8,82,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "風格",IDC_AI_LABEL_TONE,128,10,18,8
+    COMBOBOX        IDC_AI_TONE,152,8,82,100,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "音訊檔案",IDC_AI_LABEL_FILE,10,33,30,8
+    EDITTEXT        IDC_AI_FILEPATH,46,31,238,14,ES_AUTOHSCROLL
+    PUSHBUTTON      "瀏覽...",IDC_AI_BROWSE,290,30,60,14
+    LTEXT           "對話歷史",IDC_AI_LABEL_HISTORY,10,54,30,8
+    EDITTEXT        IDC_AI_HISTORY,10,64,340,70,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | ES_READONLY
+    LTEXT           "輸入內容",IDC_AI_LABEL_INPUT,10,142,30,8
+    EDITTEXT        IDC_AI_INPUT,10,152,340,44,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
+    LTEXT           "輸出結果",IDC_AI_LABEL_RESULT,10,204,30,8
+    EDITTEXT        IDC_AI_RESULT,10,214,340,48,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | ES_READONLY
+    LTEXT           "",IDC_AI_STATUS,10,270,180,18
+    PUSHBUTTON      "執行",IDC_AI_RUN,196,270,48,14
+    PUSHBUTTON      "複製結果",IDC_AI_COPY,248,270,48,14
+    PUSHBUTTON      "清空",IDC_AI_CLEAR,302,270,48,14
+END
+
+#endif    // Chinese (Traditional, Taiwan) resources
+/////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////
+// English (United States) resources
+
+#if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_ENU)
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+#ifndef APSTUDIO_INVOKED
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+ PRODUCTVERSION VERSION_MAJOR,VERSION_MINOR,VERSION_PATCH,0
+ FILEFLAGSMASK 0x17L
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x4L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040404b0"
+        BEGIN
+            VALUE "Comments", "Powered by RIME | Rime Input Method Engine"
+            VALUE "CompanyName", "Shishutang"
+            VALUE "FileDescription", "Weasel AI Assistant"
+            VALUE "FileVersion", FILE_VERSION
+            VALUE "InternalName", "WeaselAIAssistant"
+            VALUE "LegalCopyright", "Copyleft RIME Developers"
+            VALUE "OriginalFilename", "WeaselAIAssistant.exe"
+            VALUE "ProductName", "Weasel"
+            VALUE "ProductVersion", STRZ(PRODUCT_VERSION)
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x404, 1200
+    END
+END
+#endif /* APSTUDIO_INVOKED */
+
+STRINGTABLE
+BEGIN
+    IDS_STR_SYSTEM_VERSION_WARNING_CAPTION "The system version is too low"
+    IDS_STR_SYSTEM_VERSION_WARNING "Only supports Windows 8.1 or higher systems"
+    IDS_STR_UNDER_MAINTENANCE "Under maintenance"
+END
+
+IDD_AI_ASSISTANT DIALOGEX 0, 0, 520, 460
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN
+CAPTION "AI Assistant"
+FONT 9, "Segoe UI", 0, 0, 0x1
+BEGIN
+    COMBOBOX        IDC_AI_MODE,272,20,92,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Tone",IDC_AI_LABEL_TONE,10,78,80,10
+    COMBOBOX        IDC_AI_TONE,366,20,92,120,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "×",IDC_AI_CLOSE,464,20,28,28
+    LTEXT           "Audio File",IDC_AI_LABEL_FILE,18,90,80,10
+    EDITTEXT        IDC_AI_FILEPATH,18,106,382,24,ES_AUTOHSCROLL
+    PUSHBUTTON      "Browse...",IDC_AI_BROWSE,408,106,84,24
+    LTEXT           "History",IDC_AI_LABEL_HISTORY,18,140,100,10
+    EDITTEXT        IDC_AI_HISTORY,18,156,474,92,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | ES_READONLY
+    LTEXT           "Input",IDC_AI_LABEL_INPUT,18,258,100,10
+    EDITTEXT        IDC_AI_INPUT,18,274,474,86,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
+    LTEXT           "Output",IDC_AI_LABEL_RESULT,18,370,100,10
+    EDITTEXT        IDC_AI_RESULT,18,386,474,40,ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL | ES_READONLY
+    LTEXT           "",IDC_AI_STATUS,18,432,180,16
+    PUSHBUTTON      "Run",IDC_AI_RUN,202,428,88,26
+    PUSHBUTTON      "Copy",IDC_AI_COPY,304,428,88,26
+    PUSHBUTTON      "Clear",IDC_AI_CLEAR,404,428,88,26
+END
+
+#endif    // English (United States) resources
