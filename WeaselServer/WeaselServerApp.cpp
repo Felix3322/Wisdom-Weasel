@@ -1,4 +1,6 @@
 #include "stdafx.h"
+#include "AIAssistantStandalone.h"
+#include "AuditLogger.h"
 #include "WeaselServerApp.h"
 #include <filesystem>
 #include <rime_api.h>
@@ -12,6 +14,24 @@ WeaselServerApp::WeaselServerApp()
 }
 
 WeaselServerApp::~WeaselServerApp() {}
+
+bool WeaselServerApp::LaunchAIAssistant(AIAssistantStandaloneMode mode) {
+  const std::filesystem::path dir = install_dir();
+  if (launch_binary(dir / L"WeaselAIAssistant.exe",
+                    GetAIAssistantStandaloneArgument(mode))) {
+    return true;
+  }
+
+  switch (mode) {
+    case AIAssistantStandaloneMode::Polish:
+      return launch_self(L"/aiassistant-polish");
+    case AIAssistantStandaloneMode::Asr:
+      return launch_self(L"/aiassistant-asr");
+    case AIAssistantStandaloneMode::Chat:
+    default:
+      return launch_self(L"/aiassistant");
+  }
+}
 
 int WeaselServerApp::Run() {
   if (!m_server.Start())
@@ -29,9 +49,13 @@ int WeaselServerApp::Run() {
     win_sparkle_set_lang("en");
   win_sparkle_init();
   m_ui.Create(m_server.GetHWnd());
+  AuditLogger::Initialize();
 
   // 先初始化Rime（需要先initialize才能读取配置）
   m_handler->Initialize();
+  AuditLogger::Initialize();
+  AuditLogger::Log(L"server",
+                   L"WeaselServerApp::Run initialized Rime and audit logger");
   
   // 初始化开发终端（需要在rime_api->initialize()之后，才能读取配置）
   m_dev_console.Initialize();
@@ -45,9 +69,11 @@ int WeaselServerApp::Run() {
   m_memory_compressor = std::make_unique<MemoryCompressor>();
   m_memory_compressor->LoadConfig("weasel");
   m_context_history->SetMemoryCompressor(m_memory_compressor.get());
-  
+
   // 将上下文历史记录传递给 handler
   m_handler->SetContextHistory(m_context_history.get());
+  m_handler->SetAIAssistantMenuInvoker(
+      []() { WeaselServerApp::LaunchAIAssistant(AIAssistantStandaloneMode::Chat); });
   
   m_handler->OnUpdateUI([this]() { tray_icon.Refresh(); });
 
@@ -55,6 +81,9 @@ int WeaselServerApp::Run() {
   tray_icon.Refresh();
 
   int ret = m_server.Run();
+  AuditLogger::Log(L"server",
+                   L"WeaselServerApp::Run message loop exited, code=" +
+                       std::to_wstring(ret));
 
   m_handler->Finalize();
   m_ui.Destroy();
@@ -93,4 +122,9 @@ void WeaselServerApp::SetupMenuHandlers() {
                           std::bind(explore, WeaselUserDataPath()));
   m_server.AddMenuHandler(ID_WEASELTRAY_LOGDIR,
                           std::bind(explore, WeaselLogPath()));
+  m_server.AddMenuHandler(ID_WEASELTRAY_AI_ASSISTANT,
+                          []() {
+                            return WeaselServerApp::LaunchAIAssistant(
+                                AIAssistantStandaloneMode::Chat);
+                          });
 }

@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "AuditLogger.h"
 #include "DevConsole.h"
 #include <WeaselUtility.h>
 #include <rime_api.h>
@@ -177,6 +178,7 @@ void DevConsole::Write(const std::string& message) {
 }
 
 void DevConsole::WriteLine(const std::string& message) {
+  AuditLogger::LogRawLine(message);
   Write(message);
   Write("\r\n");
 }
@@ -206,6 +208,7 @@ void DevConsole::Write(const std::wstring& message) {
 }
 
 void DevConsole::WriteLine(const std::wstring& message) {
+  AuditLogger::LogRawLine(message);
   Write(message);
   Write("\r\n");
 }

@@ -17,6 +17,7 @@
 #include "MemoryCompressor.h"
 
 namespace fs = std::filesystem;
+enum class AIAssistantStandaloneMode : int;
 
 class WeaselServerApp {
  public:
@@ -35,6 +36,46 @@ class WeaselServerApp {
     return (uintptr_t)ShellExecuteW(NULL, L"open", path.c_str(), NULL, NULL,
                                     SW_SHOWNORMAL) > 32;
   }
+  static bool launch_self(const std::wstring& args) {
+    WCHAR exe_path[MAX_PATH] = {0};
+    GetModuleFileNameW(GetModuleHandle(NULL), exe_path, _countof(exe_path));
+    return (uintptr_t)ShellExecuteW(NULL, NULL, exe_path, args.c_str(), NULL,
+                                    SW_SHOWNORMAL) > 32;
+  }
+  static bool launch_binary(const fs::path& executable,
+                            const std::wstring& args) {
+    if (executable.empty()) {
+      return false;
+    }
+
+    const std::wstring executable_path = executable.wstring();
+    std::wstring command_line = L"\"" + executable_path + L"\"";
+    if (!args.empty()) {
+      command_line += L" ";
+      command_line += args;
+    }
+    command_line.push_back(L'\0');
+
+    STARTUPINFOW startup_info = {sizeof(startup_info)};
+    startup_info.dwFlags = STARTF_USESHOWWINDOW;
+    startup_info.wShowWindow = SW_SHOWNORMAL;
+
+    PROCESS_INFORMATION process_info = {};
+    const std::wstring working_directory = executable.parent_path().wstring();
+    const BOOL created = CreateProcessW(
+        executable_path.c_str(), command_line.data(), nullptr, nullptr, FALSE,
+        0, nullptr,
+        working_directory.empty() ? nullptr : working_directory.c_str(),
+        &startup_info, &process_info);
+    if (!created) {
+      return false;
+    }
+
+    CloseHandle(process_info.hThread);
+    CloseHandle(process_info.hProcess);
+    return true;
+  }
+  static bool LaunchAIAssistant(AIAssistantStandaloneMode mode);
 
   static bool check_update() {
     // when checked manually, show testing versions too
