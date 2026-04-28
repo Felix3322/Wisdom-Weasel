@@ -66,9 +66,9 @@ if (!(Test-Path $alphaCorePdbSource)) {
   $alphaCorePdbSource = Join-Path $root 'output\Win32\lua\wanxiang\alpha_rerank_core.pdb'
 }
 
-$alphaRuntimeSourceDir = Join-Path $root 'third_party\alpha-input\target\release'
+$alphaRuntimeSourceDir = Join-Path $root 'alpha_backend\target\release'
 if (!(Test-Path $alphaRuntimeSourceDir)) {
-  $alphaRuntimeSourceDir = Join-Path $root 'alpha_backend\target\release'
+  $alphaRuntimeSourceDir = Join-Path $root 'third_party\alpha-input\target\release'
 }
 
 $optionalAlphaFiles = @(
