@@ -3,10 +3,14 @@ pub mod lmdb_manager;
 pub mod model;
 pub mod predictive_similarity;
 pub mod preference;
+pub mod user_frequency;
 
 use config::Config;
-use predictive_similarity::{PerformanceConfig, PredictiveError};
+use predictive_similarity::{
+    CandidateScoreBreakdown, PerformanceConfig, PredictiveError, SemanticRefinementConfig,
+};
 use preference::PreferenceConfig;
+use user_frequency::UserFrequencyConfig;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int};
 use std::path::{Path, PathBuf};
@@ -98,6 +102,20 @@ impl AlphaPredictive {
                 .get_int("performance.candidate_cache_capacity")
                 .unwrap_or(4096) as usize,
         };
+        let semantic_refinement_config = SemanticRefinementConfig {
+            enabled: config
+                .get_bool("semantic_refinement.enabled")
+                .unwrap_or(true),
+            encoder_candidate_blend_weight: config
+                .get_float("semantic_refinement.encoder_candidate_blend_weight")
+                .unwrap_or(0.45) as f32,
+            ambiguity_margin_threshold: config
+                .get_float("semantic_refinement.ambiguity_margin_threshold")
+                .unwrap_or(0.03) as f32,
+            max_refine_candidates: config
+                .get_int("semantic_refinement.max_refine_candidates")
+                .unwrap_or(3) as usize,
+        };
 
         let preference_path = config
             .get_string("preference.persistence_path")
@@ -140,6 +158,34 @@ impl AlphaPredictive {
             save_every_updates: config.get_int("preference.save_every_updates").unwrap_or(8)
                 as usize,
         };
+        let user_frequency_path = config
+            .get_string("user_frequency.persistence_path")
+            .unwrap_or_else(|_| "user_frequency.json".to_string());
+        let user_frequency_config = UserFrequencyConfig {
+            enabled: config.get_bool("user_frequency.enabled").unwrap_or(true),
+            persistence_path: resolve_optional_path(config_path, &user_frequency_path),
+            session_weight: config
+                .get_float("user_frequency.session_weight")
+                .unwrap_or(0.4) as f32,
+            long_term_weight: config
+                .get_float("user_frequency.long_term_weight")
+                .unwrap_or(0.6) as f32,
+            session_decay: config
+                .get_float("user_frequency.session_decay")
+                .unwrap_or(0.06) as f32,
+            long_term_decay: config
+                .get_float("user_frequency.long_term_decay")
+                .unwrap_or(0.01) as f32,
+            min_count_threshold: config
+                .get_float("user_frequency.min_count_threshold")
+                .unwrap_or(0.0) as f32,
+            saturation: config
+                .get_float("user_frequency.saturation")
+                .unwrap_or(2.6) as f32,
+            save_every_updates: config
+                .get_int("user_frequency.save_every_updates")
+                .unwrap_or(4) as usize,
+        };
 
         info!("Initializing predictive similarity model...");
         let predictive = predictive_similarity::PredictiveSimilarity::<i8>::new(
@@ -153,6 +199,8 @@ impl AlphaPredictive {
             &inference_hardware,
             performance_config,
             preference_config,
+            user_frequency_config,
+            semantic_refinement_config,
         )
         .map_err(AlphaError::Predictive)?;
         info!("Predictive similarity model initialized.");
@@ -170,6 +218,16 @@ impl AlphaPredictive {
             .compute_similarities(input, candidates)
             .map_err(AlphaError::Predictive)?;
         Ok(similarities)
+    }
+
+    pub fn compute_score_breakdowns(
+        &self,
+        input: &str,
+        candidates: &[String],
+    ) -> Result<Vec<CandidateScoreBreakdown>, AlphaError> {
+        self.predictive
+            .compute_score_breakdowns(input, candidates)
+            .map_err(AlphaError::Predictive)
     }
 
     pub fn warm_query(&self, input: &str) -> Result<(), AlphaError> {
@@ -228,6 +286,16 @@ pub extern "C" fn alpha_predictive_free(predictive: *mut AlphaPredictive) {
 pub struct SimilarityResult {
     word: *mut c_char,
     score: c_float,
+}
+
+#[repr(C)]
+pub struct SimilarityBreakdownResult {
+    word: *mut c_char,
+    semantic_score: c_float,
+    preference_score: c_float,
+    user_frequency_score: c_float,
+    final_score: c_float,
+    dynamic_preference_factor: c_float,
 }
 
 #[allow(improper_ctypes_definitions)]
@@ -305,7 +373,9 @@ pub extern "C" fn alpha_predictive_compute_similarities_ordered(
         }
 
         match predictive.compute_similarities(input, &rust_candidates) {
-            Ok(sims) => {
+            Ok(mut sims) => {
+                sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
                 let mut c_results: Vec<SimilarityResult> = Vec::with_capacity(sims.len());
                 for (word, score) in sims {
                     let c_word = CString::new(word).unwrap().into_raw();
@@ -322,6 +392,65 @@ pub extern "C" fn alpha_predictive_compute_similarities_ordered(
             }
             Err(e) => {
                 eprintln!("Error computing ordered similarities: {:?}", e);
+                -1
+            }
+        }
+    }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
+pub extern "C" fn alpha_predictive_compute_score_breakdowns_ordered(
+    predictive: *mut AlphaPredictive,
+    input: *const c_char,
+    candidates: *const *const c_char,
+    num_candidates: c_int,
+    results: *mut *mut SimilarityBreakdownResult,
+) -> c_int {
+    unsafe {
+        let predictive = &*predictive;
+        let input = CStr::from_ptr(input)
+            .to_str()
+            .expect("Invalid UTF-8 string");
+
+        let mut rust_candidates = Vec::new();
+        for i in 0..num_candidates {
+            let c_str_ptr = *candidates.offset(i as isize);
+            let candidate = CStr::from_ptr(c_str_ptr)
+                .to_str()
+                .expect("Invalid UTF-8 string");
+            rust_candidates.push(candidate.to_string());
+        }
+
+        match predictive.compute_score_breakdowns(input, &rust_candidates) {
+            Ok(mut breakdowns) => {
+                breakdowns.sort_by(|a, b| {
+                    b.final_score
+                        .partial_cmp(&a.final_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let mut c_results: Vec<SimilarityBreakdownResult> =
+                    Vec::with_capacity(breakdowns.len());
+                for item in breakdowns {
+                    let c_word = CString::new(item.candidate).unwrap().into_raw();
+                    c_results.push(SimilarityBreakdownResult {
+                        word: c_word,
+                        semantic_score: item.semantic_score,
+                        preference_score: item.preference_score,
+                        user_frequency_score: item.user_frequency_score,
+                        final_score: item.final_score,
+                        dynamic_preference_factor: item.dynamic_preference_factor,
+                    });
+                }
+
+                let boxed_results = c_results.into_boxed_slice();
+                let len = boxed_results.len();
+                *results = Box::into_raw(boxed_results) as *mut SimilarityBreakdownResult;
+                len as c_int
+            }
+            Err(e) => {
+                eprintln!("Error computing score breakdowns: {:?}", e);
                 -1
             }
         }
@@ -411,6 +540,23 @@ pub extern "C" fn alpha_predictive_apply_user_feedback(
 #[unsafe(no_mangle)]
 pub extern "C" fn alpha_predictive_free_similarities_result(
     results: *mut SimilarityResult,
+    len: c_int,
+) {
+    unsafe {
+        if results.is_null() {
+            return;
+        }
+        let slice = Box::from_raw(std::slice::from_raw_parts_mut(results, len as usize));
+        for result in slice.into_vec() {
+            let _ = CString::from_raw(result.word);
+        }
+    }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
+pub extern "C" fn alpha_predictive_free_similarity_breakdown_result(
+    results: *mut SimilarityBreakdownResult,
     len: c_int,
 ) {
     unsafe {
