@@ -121,6 +121,222 @@ bool IsCandidateWrapperChar(wchar_t ch) {
   }
 }
 
+bool IsCjkIdeographChar(wchar_t ch) {
+  return (ch >= 0x3400 && ch <= 0x4DBF) || (ch >= 0x4E00 && ch <= 0x9FFF) ||
+         (ch >= 0xF900 && ch <= 0xFAFF);
+}
+
+bool IsEmojiLikeCodeUnit(wchar_t ch) {
+  return (ch >= 0x2600 && ch <= 0x27BF) || (ch >= 0xD83C && ch <= 0xDBFF) ||
+         (ch >= 0xDC00 && ch <= 0xDFFF) || ch == 0x200D || ch == 0xFE0F;
+}
+
+bool IsAsciiKaomojiLetter(wchar_t ch) {
+  switch (std::towlower(ch)) {
+    case L'q':
+    case L'w':
+    case L'o':
+    case L'u':
+    case L'v':
+    case L'x':
+    case L't':
+    case L'm':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsQuoteWrapperChar(wchar_t ch) {
+  switch (ch) {
+    case L'"':
+    case L'\'':
+    case L'`':
+    case L'“':
+    case L'”':
+    case L'‘':
+    case L'’':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsEmoticonSignalChar(wchar_t ch) {
+  switch (ch) {
+    case L':':
+    case L';':
+    case L'=':
+    case L'^':
+    case L'~':
+    case L'T':
+    case L't':
+    case L'X':
+    case L'x':
+    case L'8':
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsKaomojiStructuralChar(wchar_t ch) {
+  switch (ch) {
+    case L'^':
+    case L'_':
+    case L'~':
+    case L'=':
+    case L'*':
+    case L'-':
+    case L'/':
+    case L'\\':
+    case L'|':
+    case L'°':
+    case L'•':
+    case L'ω':
+    case L'▽':
+    case L'∀':
+    case L'╯':
+    case L'╰':
+    case L'¯':
+    case L'ツ':
+    case L'つ':
+    case L'ノ':
+    case L'ヽ':
+    case L'ง':
+    case L'๑':
+    case L'ㅂ':
+    case L'ಠ':
+    case L'益':
+    case L'♥':
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::wstring TrimCandidateWhitespace(std::wstring token) {
+  while (!token.empty() && std::iswspace(token.front())) {
+    token.erase(token.begin());
+  }
+  while (!token.empty() && std::iswspace(token.back())) {
+    token.pop_back();
+  }
+  return token;
+}
+
+void StripLeadingIndexPrefix(std::wstring& token) {
+  size_t prefix_digits = 0;
+  while (prefix_digits < token.size() && IsDigitWide(token[prefix_digits])) {
+    ++prefix_digits;
+  }
+  if (prefix_digits > 0 && prefix_digits < token.size()) {
+    const wchar_t marker = token[prefix_digits];
+    if (marker == L'.' || marker == L'、' || marker == L')' ||
+        marker == L']' || marker == L'：' || marker == L':') {
+      token.erase(0, prefix_digits + 1);
+    }
+  }
+}
+
+bool LooksLikeExpressiveToken(const std::wstring& token) {
+  if (token.empty()) {
+    return false;
+  }
+
+  size_t visible_count = 0;
+  size_t structural_count = 0;
+  size_t expressive_letter_count = 0;
+  size_t emoticon_signal_count = 0;
+  size_t generic_punct_count = 0;
+  bool has_emoji_like_unit = false;
+  bool has_kaomoji_signal = false;
+
+  for (wchar_t ch : token) {
+    if (std::iswspace(ch)) {
+      continue;
+    }
+    ++visible_count;
+    if (IsCjkIdeographChar(ch) || IsDigitWide(ch)) {
+      return false;
+    }
+    if (IsEmojiLikeCodeUnit(ch)) {
+      has_emoji_like_unit = true;
+      continue;
+    }
+    if (std::iswalpha(ch)) {
+      if (!IsAsciiKaomojiLetter(ch)) {
+        return false;
+      }
+      ++expressive_letter_count;
+      continue;
+    }
+    if (IsKaomojiStructuralChar(ch)) {
+      ++structural_count;
+      has_kaomoji_signal = true;
+      continue;
+    }
+    if (IsCandidateWrapperChar(ch) || std::iswpunct(ch)) {
+      ++generic_punct_count;
+      if (IsEmoticonSignalChar(ch)) {
+        ++emoticon_signal_count;
+      }
+      continue;
+    }
+    if (ch < 0x0080) {
+      return false;
+    }
+    ++generic_punct_count;
+  }
+
+  if (visible_count == 0 || visible_count > 24) {
+    return false;
+  }
+  if (has_emoji_like_unit) {
+    return true;
+  }
+  if (has_kaomoji_signal &&
+      (structural_count + generic_punct_count + expressive_letter_count) >=
+          2) {
+    return true;
+  }
+  if (emoticon_signal_count >= 1 && generic_punct_count >= 2 &&
+      visible_count <= 8) {
+    return true;
+  }
+  return expressive_letter_count >= 2 &&
+         (generic_punct_count + structural_count) >= 1 && visible_count <= 8;
+}
+
+std::wstring NormalizeExpressiveCandidateToken(std::wstring token) {
+  token = TrimCandidateWhitespace(std::move(token));
+  if (token.empty()) {
+    return std::wstring();
+  }
+
+  StripLeadingIndexPrefix(token);
+  token = TrimCandidateWhitespace(std::move(token));
+  if (token.empty()) {
+    return std::wstring();
+  }
+
+  while (!token.empty() && IsQuoteWrapperChar(token.front())) {
+    token.erase(token.begin());
+  }
+  while (!token.empty() && IsQuoteWrapperChar(token.back())) {
+    token.pop_back();
+  }
+  token = TrimCandidateWhitespace(std::move(token));
+  if (token.empty()) {
+    return std::wstring();
+  }
+
+  if (LooksLikeExpressiveToken(token)) {
+    return token;
+  }
+  return std::wstring();
+}
+
 std::wstring NormalizeCandidateToken(std::wstring token) {
   // Strip prefix wrapper chars
   auto start_it = std::find_if_not(token.begin(), token.end(), IsCandidateWrapperChar);
@@ -167,6 +383,9 @@ bool IsIgnorableCandidateToken(const std::wstring& token) {
   if (token.empty()) {
     return true;
   }
+  if (LooksLikeExpressiveToken(token)) {
+    return false;
+  }
 
   std::wstring lower;
   lower.reserve(token.size());
@@ -200,7 +419,8 @@ bool IsIgnorableCandidateToken(const std::wstring& token) {
 
 std::vector<std::wstring> ExtractCandidatesFromUtf8Text(
     const std::string& text_utf8,
-    size_t max_candidates) {
+    size_t max_candidates,
+    bool allow_expressive_tokens = false) {
   std::vector<std::wstring> candidates;
   if (text_utf8.empty()) {
     return candidates;
@@ -208,10 +428,19 @@ std::vector<std::wstring> ExtractCandidatesFromUtf8Text(
 
   const std::wstring content_w = u8tow(text_utf8);
   std::wstringstream ss(content_w);
-  std::wstring token;
-  while (ss >> token) {
-    token = NormalizeCandidateToken(token);
+  std::wstring raw_token;
+  while (ss >> raw_token) {
+    std::wstring token;
+    if (allow_expressive_tokens) {
+      token = NormalizeExpressiveCandidateToken(raw_token);
+    }
+    if (token.empty()) {
+      token = NormalizeCandidateToken(raw_token);
+    }
     if (IsIgnorableCandidateToken(token)) {
+      continue;
+    }
+    if (!allow_expressive_tokens && LooksLikeExpressiveToken(token)) {
       continue;
     }
     if (std::find(candidates.begin(), candidates.end(), token) !=
@@ -362,8 +591,13 @@ std::string ExtractContentFromOllamaGenerateResponse(
 }
 
 std::wstring TrimLeadingWhitespaceAndPunctuation(std::wstring text) {
-  while (!text.empty() && (std::iswspace(text.front()) ||
-                           IsCandidateWrapperChar(text.front()))) {
+  while (!text.empty() && std::iswspace(text.front())) {
+    text.erase(text.begin());
+  }
+  if (LooksLikeExpressiveToken(text)) {
+    return text;
+  }
+  while (!text.empty() && IsCandidateWrapperChar(text.front())) {
     text.erase(text.begin());
   }
   while (!text.empty() && std::iswspace(text.back())) {
@@ -400,7 +634,8 @@ std::wstring RemovePromptEcho(const std::wstring& prompt,
 std::vector<std::wstring> BuildContinuationCandidates(
     const std::wstring& prompt,
     const std::wstring& generated,
-    size_t max_candidates) {
+    size_t max_candidates,
+    bool allow_expressive_tokens = false) {
   std::vector<std::wstring> candidates;
   std::wstring continuation = RemovePromptEcho(prompt, generated);
   if (continuation.empty()) {
@@ -417,14 +652,19 @@ std::vector<std::wstring> BuildContinuationCandidates(
   }
 
   static const size_t kMaxVisibleCandidateLen = 16u;
-  static const size_t kPreferredLengths[] = {2, 4, 6, 8, 12, 16};
+  static const size_t kPreferredLengths[] = {2, 3, 4, 5, 6, 8, 12, 16};
   const size_t visible_len = (std::min)(continuation.size(), kMaxVisibleCandidateLen);
   for (size_t preferred_len : kPreferredLengths) {
     if (preferred_len > visible_len) {
       continue;
     }
     std::wstring candidate = continuation.substr(0, preferred_len);
-    candidate = NormalizeCandidateToken(candidate);
+    if (allow_expressive_tokens) {
+      candidate = NormalizeExpressiveCandidateToken(candidate);
+    }
+    if (candidate.empty()) {
+      candidate = NormalizeCandidateToken(continuation.substr(0, preferred_len));
+    }
     if (IsIgnorableCandidateToken(candidate)) {
       continue;
     }
@@ -438,7 +678,12 @@ std::vector<std::wstring> BuildContinuationCandidates(
   }
 
   std::wstring full_candidate = continuation.substr(0, visible_len);
-  full_candidate = NormalizeCandidateToken(full_candidate);
+  if (allow_expressive_tokens) {
+    full_candidate = NormalizeExpressiveCandidateToken(full_candidate);
+  }
+  if (full_candidate.empty()) {
+    full_candidate = NormalizeCandidateToken(continuation.substr(0, visible_len));
+  }
   if (!IsIgnorableCandidateToken(full_candidate) &&
       std::find(candidates.begin(), candidates.end(), full_candidate) ==
           candidates.end()) {
@@ -451,12 +696,86 @@ std::vector<std::wstring> BuildContinuationCandidates(
   return candidates;
 }
 
+std::wstring BuildNoInputShortCandidateDiversityKey(
+    const std::wstring& candidate) {
+  std::wstring normalized = candidate;
+  normalized.erase(
+      std::remove_if(normalized.begin(), normalized.end(),
+                     [](wchar_t ch) { return std::iswspace(ch) != 0; }),
+      normalized.end());
+  if (LooksLikeExpressiveToken(normalized)) {
+    return normalized;
+  }
+  while (!normalized.empty() &&
+         normalized.back() == static_cast<wchar_t>(0xFFFD)) {
+    normalized.pop_back();
+  }
+  if (normalized.size() <= 2) {
+    return normalized;
+  }
+  return normalized.substr(0, 2);
+}
+
+std::vector<std::wstring> ReorderCandidatesForNoInputDiversity(
+    const std::vector<std::wstring>& candidates,
+    size_t max_candidates) {
+  std::vector<std::wstring> reordered;
+  reordered.reserve(candidates.size());
+  std::vector<bool> used(candidates.size(), false);
+  std::vector<std::wstring> short_diversity_keys;
+
+  auto try_append = [&](size_t index) {
+    if (index >= candidates.size() || used[index]) {
+      return;
+    }
+    reordered.push_back(candidates[index]);
+    used[index] = true;
+  };
+
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    const size_t candidate_len = candidates[i].size();
+    const bool is_expressive = LooksLikeExpressiveToken(candidates[i]);
+    if (!is_expressive && (candidate_len < 2 || candidate_len > 4)) {
+      continue;
+    }
+    const std::wstring diversity_key =
+        BuildNoInputShortCandidateDiversityKey(candidates[i]);
+    if (diversity_key.empty()) {
+      continue;
+    }
+    if (std::find(short_diversity_keys.begin(), short_diversity_keys.end(),
+                  diversity_key) != short_diversity_keys.end()) {
+      continue;
+    }
+    short_diversity_keys.push_back(diversity_key);
+    try_append(i);
+  }
+
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    const size_t candidate_len = candidates[i].size();
+    if ((candidate_len >= 2 && candidate_len <= 4) ||
+        LooksLikeExpressiveToken(candidates[i])) {
+      try_append(i);
+    }
+  }
+
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    try_append(i);
+  }
+
+  if (max_candidates > 0 && reordered.size() > max_candidates) {
+    reordered.resize(max_candidates);
+  }
+  return reordered;
+}
+
 std::vector<std::wstring> BuildSingleContinuationCandidates(
     const std::wstring& prompt,
     const std::wstring& generated,
     size_t max_candidates,
     size_t max_len,
-    const wchar_t* stop_chars) {
+    const wchar_t* stop_chars,
+    bool allow_expressive_tokens = false) {
   std::vector<std::wstring> candidates;
   std::wstring continuation = RemovePromptEcho(prompt, generated);
   if (continuation.empty()) {
@@ -473,8 +792,14 @@ std::vector<std::wstring> BuildSingleContinuationCandidates(
   }
 
   const size_t visible_len = (std::min)(continuation.size(), max_len);
-  std::wstring candidate =
-      NormalizeCandidateToken(continuation.substr(0, visible_len));
+  std::wstring candidate;
+  if (allow_expressive_tokens) {
+    candidate =
+        NormalizeExpressiveCandidateToken(continuation.substr(0, visible_len));
+  }
+  if (candidate.empty()) {
+    candidate = NormalizeCandidateToken(continuation.substr(0, visible_len));
+  }
   if (!IsIgnorableCandidateToken(candidate)) {
     candidates.push_back(candidate);
   }
@@ -490,7 +815,8 @@ std::vector<std::wstring> BuildSentenceContinuationCandidates(
     size_t max_candidates) {
   static constexpr size_t kMaxSentenceContinuationLen = 24u;
   return BuildSingleContinuationCandidates(prompt, generated, max_candidates,
-                                           kMaxSentenceContinuationLen, L"\r\n。！？!?；;");
+                                           kMaxSentenceContinuationLen,
+                                           L"\r\n。！？!?；;");
 }
 
 bool LooksLikeLongPinyinInput(const std::wstring& text) {
@@ -725,8 +1051,10 @@ InstructPrompt BuildInstructPrompt(const LLMRequest& request) {
           L"1. 只返回候选词，不要任何解释或标点\n"
           L"2. 候选词之间用单个空格分隔\n"
           L"3. 按可能性从高到低排列\n"
-          L"4. 确保候选词都是有效的中文词汇或常用短语\n"
-          L"5. 返回词数严格不超过" +
+          L"4. 优先给出 2 到 4 字的自然短词或短语；如果上下文明显在表达情绪，也可以给常见 emoji 或短颜文字\n"
+          L"5. 至少包含 2 个彼此不同、不是同一前缀改写的短候选\n"
+          L"6. 候选可以是有效的中文词汇、常用短语、单个 emoji 或短颜文字\n"
+          L"7. 返回词数严格不超过" +
           std::to_wstring(request.max_candidates) + L"个\n";
       prompt.user_prompt = L"上下文：\"" + request.context + L"\"\n";
       prompt.user_prompt += L"候选词：";
@@ -781,7 +1109,9 @@ std::wstring BuildCompactPrompt(const LLMRequest& request) {
       std::wstring prompt = L"请根据以下上下文预测接下来最可能出现的" +
                             std::to_wstring(request.max_candidates) +
                             L"个中文候选词。\n"
-                            L"只返回候选词，使用空格分隔，不要解释。\n";
+                            L"只返回候选词，使用空格分隔，不要解释。\n"
+                            L"优先给 2 到 4 字短词；如果上下文适合，也允许 emoji 或短颜文字。"
+                            L"至少包含 2 个彼此不同的短候选，避免全部都是同一前缀的改写。\n";
       prompt += L"上下文：\"" + request.context + L"\"\n";
       prompt += L"候选词：";
       return prompt;
@@ -1229,6 +1559,10 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
 
     const std::vector<OllamaContinuationBranchSpec> branch_specs = {
         {L"首候选", low_temperature, 8, 8, L"\r\n。！？!?；;，,、 ", true, 1},
+        {L"高多样短词", high_temperature, 8, 3, L"\r\n。！？!?；;，,、 ", false,
+         2},
+        {L"高多样短语", (std::min)(1.0, high_temperature + 0.08), 12, 4,
+         L"\r\n。！？!?；;，,、 ", false, 2},
         {L"补充短语", (low_temperature + high_temperature) / 2.0, 20, 8,
          L"\r\n。！？!?；;，,、", false, 2},
         {L"补充长句", high_temperature, 48, 24, L"\r\n。！？!?；;", false, 3},
@@ -1290,7 +1624,8 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
       if (!on_partial || candidates.empty()) {
         return true;
       }
-      std::vector<std::wstring> visible_candidates = candidates;
+      std::vector<std::wstring> visible_candidates =
+          ReorderCandidatesForNoInputDiversity(candidates, request.max_candidates);
       if (request.max_candidates > 0 &&
           visible_candidates.size() > request.max_candidates) {
         visible_candidates.resize(request.max_candidates);
@@ -1323,7 +1658,7 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
       const size_t candidate_count_before = candidates.size();
       merge_candidate_set(BuildSingleContinuationCandidates(
           request.context, generated, 1, branch.max_candidate_chars,
-          branch.stop_chars));
+          branch.stop_chars, true));
       if (candidates.size() > candidate_count_before &&
           !publish_candidates()) {
         break;
@@ -1336,9 +1671,11 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
 
     if (g_dev_console && g_dev_console->IsEnabled()) {
       std::wstringstream ss;
-      ss << L"[LLM] continuation 三分支合并后候选数: " << candidates.size();
+      ss << L"[LLM] continuation 多分支合并后候选数: " << candidates.size();
       g_dev_console->WriteLine(ss.str());
     }
+    candidates =
+        ReorderCandidatesForNoInputDiversity(candidates, request.max_candidates);
     if (request.max_candidates > 0 &&
         candidates.size() > request.max_candidates) {
       candidates.resize(request.max_candidates);
@@ -1445,8 +1782,9 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
 
   // 执行HTTP请求
   std::string response_body;
-  if (!ExecuteHttpRequest(m_api_url, request_body, request.max_candidates,
-                          on_partial, response_body)) {
+  if (!ExecuteHttpRequest(m_api_url, request_body, request.type,
+                          request.max_candidates, on_partial,
+                          response_body)) {
     if (g_dev_console && g_dev_console->IsEnabled()) {
       g_dev_console->WriteLine(L"[LLM] 请求失败");
     }
@@ -1460,7 +1798,7 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
   }
 
   // 解析响应
-  candidates = ParseResponse(response_body);
+  candidates = ParseResponse(response_body, request.type);
   if (request.type == LLMRequestType::RimeReorder) {
     const std::wstring extracted_content =
         u8tow(ExtractContentFromSseResponse(response_body));
@@ -1513,6 +1851,7 @@ bool OpenAICompatibleProvider::IsAvailable() const {
 bool OpenAICompatibleProvider::ExecuteHttpRequest(
     const std::string& url,
     const std::string& request_body,
+    LLMRequestType request_type,
     size_t max_candidates,
     const LLMPartialCallback& on_partial,
     std::string& response_body) {
@@ -1645,8 +1984,9 @@ bool OpenAICompatibleProvider::ExecuteHttpRequest(
           aggregated_content += delta_content;
           if (on_partial) {
             std::vector<std::wstring> partial_candidates =
-                ExtractCandidatesFromUtf8Text(aggregated_content,
-                                              max_candidates);
+                ExtractCandidatesFromUtf8Text(
+                    aggregated_content, max_candidates,
+                    request_type == LLMRequestType::NoInputPrediction);
             if (!partial_candidates.empty() &&
                 partial_candidates != last_partial_candidates) {
               last_partial_candidates = partial_candidates;
@@ -1789,7 +2129,8 @@ bool OpenAICompatibleProvider::ExecuteOllamaGenerateRequest(
         if (on_partial) {
           std::vector<std::wstring> partial_candidates =
               BuildContinuationCandidates(
-                  prompt_prefix, u8tow(aggregated_content), max_candidates);
+                  prompt_prefix, u8tow(aggregated_content), max_candidates,
+                  true);
           if (!partial_candidates.empty() &&
               partial_candidates != last_partial_candidates) {
             last_partial_candidates = partial_candidates;
@@ -1818,10 +2159,14 @@ bool OpenAICompatibleProvider::ExecuteOllamaGenerateRequest(
 }
 
 std::vector<std::wstring> OpenAICompatibleProvider::ParseResponse(
-    const std::string& json_response) {
+    const std::string& json_response,
+    LLMRequestType request_type) {
+  const bool allow_expressive_tokens =
+      request_type == LLMRequestType::NoInputPrediction;
   if (json_response.find("data: ") != std::string::npos) {
     return ExtractCandidatesFromUtf8Text(
-        ExtractContentFromSseResponse(json_response), 0);
+        ExtractContentFromSseResponse(json_response), 0,
+        allow_expressive_tokens);
   }
 
   std::string content;
@@ -1844,7 +2189,7 @@ std::vector<std::wstring> OpenAICompatibleProvider::ParseResponse(
   if (content.empty()) {
     return {};
   }
-  return ExtractCandidatesFromUtf8Text(content, 0);
+  return ExtractCandidatesFromUtf8Text(content, 0, allow_expressive_tokens);
 }
 
 // 全局开发终端实例（供LLMProvider使用）

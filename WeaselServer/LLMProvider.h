@@ -85,6 +85,7 @@ class OpenAICompatibleProvider : public LLMProvider {
   // 执行HTTP请求
   bool ExecuteHttpRequest(const std::string& url,
                           const std::string& request_body,
+                          LLMRequestType request_type,
                           size_t max_candidates,
                           const LLMPartialCallback& on_partial,
                           std::string& response_body);
@@ -95,7 +96,8 @@ class OpenAICompatibleProvider : public LLMProvider {
                                     const LLMPartialCallback& on_partial,
                                     std::string& response_body);
   // 解析JSON响应
-  std::vector<std::wstring> ParseResponse(const std::string& json_response);
+  std::vector<std::wstring> ParseResponse(const std::string& json_response,
+                                          LLMRequestType request_type);
   void CloseConnection();  // 关闭并清空复用的 HTTP 连接
 
   bool m_enabled;
